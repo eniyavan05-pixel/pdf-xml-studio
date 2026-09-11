@@ -26,14 +26,14 @@ os.makedirs(OUTPUTS_DIR, exist_ok=True)
 app = FastAPI(title="DocBook 5.1 XML Studio")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-# -------------------------------------------------------------
-# DOCBOOK 5.1 NAMESPACE MAPPINGS
-# -------------------------------------------------------------
 DOCBOOK_NS = "http://docbook.org/ns/docbook"
+MATHML_NS = "http://www.w3.org/1998/Math/MathML"
 XML_NS = "http://www.w3.org/XML/1998/namespace"
 XLINK_NS = "http://www.w3.org/1999/xlink"
+
 NS_MAP = {
     None: DOCBOOK_NS,
+    "mml": MATHML_NS,
     "xml": XML_NS,
     "xlink": XLINK_NS
 }
@@ -73,10 +73,11 @@ STANDALONE_WORDS = {
     "de", "do", "da", "dos", "das", "em", "um", "uma", "com", "por", "para", "ou", "e"
 }
 
-SPEAKER_LABEL_REGEX = re.compile(r'^[A-Z0-9]{1,10}\s*:\s+')
-ORDERED_LIST_REGEX = re.compile(r'^\s*(\d+)[\.\)]\s+(.*)', re.DOTALL)
-ITEMIZED_LIST_REGEX = re.compile(r'^\s*(?:[•\*\u2022\u25E6\u2043\u2219]|&#x2022;|-|–|—)\s+(.*)', re.DOTALL)
+ORDERED_PATTERN = re.compile(r'^\s*(\d+)[\.\)]\s+(.*)', re.DOTALL)
+ITEMIZED_PATTERN = re.compile(r'^\s*(?:[•\*\u2022\u25E6\u2043\u2219]|&#x2022;|-|–|—)\s+(.*)', re.DOTALL)
 ATTRIBUTION_REGEX = re.compile(r'^\s*(?:—|&#x2014;|–|&#x2013;|--)\s*(.*)', re.DOTALL)
+EQUATION_NUM_PATTERN = re.compile(r'^(.*)\s+(\(\d+\))\s*$')
+MATH_SYMBOLS_PATTERN = re.compile(r'[∑∫∂∇∏±≤≥≈≠∈∀∃⊂∪∩×÷²³√]')
 
 RE_CHAPTER = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
 RE_SEC = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
@@ -166,6 +167,8 @@ def post_process_clean_xml(xml_str: str) -> str:
     xml_str = re.sub(r'&#x00A0;', ' ', xml_str)
     xml_str = re.sub(r'[ \t]+</para>', '</para>', xml_str)
     xml_str = re.sub(r'[ \t]+</foot-para>', '</foot-para>', xml_str)
+    xml_str = re.sub(r'[ \t]+</equation>', '</equation>', xml_str)
+    xml_str = re.sub(r'[ \t]+</informalequation>', '</informalequation>', xml_str)
     xml_str = re.sub(r'[ \t]+</sect1>', '</sect1>', xml_str)
     xml_str = re.sub(r'[ \t]+</sect2>', '</sect2>', xml_str)
     xml_str = re.sub(r'[ \t]+</chapter>', '</chapter>', xml_str)
@@ -175,21 +178,9 @@ def post_process_clean_xml(xml_str: str) -> str:
     xml_str = re.sub(r'[ \t]+</listitem>', '</listitem>', xml_str)
     xml_str = re.sub(r'[ \t]+</orderedlist>', '</orderedlist>', xml_str)
     xml_str = re.sub(r'[ \t]+</itemizedlist>', '</itemizedlist>', xml_str)
-    xml_str = re.sub(r'<para>[ \t]+', '<para>', xml_str)
-    xml_str = re.sub(r'<foot-para>[ \t]+', '<foot-para>', xml_str)
-    xml_str = re.sub(r'<title>[ \t]+', '<title>', xml_str)
-    xml_str = re.sub(r'&#x201C;\s+', '&#x201C;', xml_str)
-    xml_str = re.sub(r'\s+&#x201D;', '&#x201D;', xml_str)
-    xml_str = re.sub(r'(&#x2019;|\')\s+(s|t|d|m|re|ve|ll|he|em)\b', r'\1\2', xml_str, flags=re.IGNORECASE)
-    xml_str = re.sub(r'\b(inter|intra|pre|post|macro|micro)and\b', r'\1- and', xml_str, flags=re.IGNORECASE)
-    xml_str = re.sub(r'\b(inter|intra|pre|post|macro|micro)or\b', r'\1- or', xml_str, flags=re.IGNORECASE)
-    xml_str = re.sub(r'\s*&#x2013;\s*', '&#x2013;', xml_str)
-    xml_str = re.sub(r'\s*&#x2014;\s*', '&#x2014;', xml_str)
     xml_str = re.sub(r'<para>\s*</para>', '', xml_str)
     xml_str = re.sub(r'<foot-para>\s*</foot-para>', '', xml_str)
     xml_str = re.sub(r'<blockquote>\s*</blockquote>', '', xml_str)
-    xml_str = re.sub(r'<orderedlist>\s*</orderedlist>', '', xml_str)
-    xml_str = re.sub(r'<itemizedlist>\s*</itemizedlist>', '', xml_str)
     return xml_str
 
 def process_single_page(page_data: tuple) -> dict:
@@ -200,22 +191,44 @@ def process_single_page(page_data: tuple) -> dict:
     page_width = page_rect.width
     page_height = page_rect.height
 
-    blocks = page.get_text("blocks")
+    page_dict = page.get_text("dict")
     doc.close()
 
     parsed_blocks = []
-    valid_blocks = [b for b in blocks if 55 < b[1] < page_height - 55 and b[4].strip()]
-    col_lefts = [b[0] for b in valid_blocks]
-    col_rights = [b[2] for b in valid_blocks]
-    base_left = min(col_lefts) if col_lefts else 50.0
-    base_right = max(col_rights) if col_rights else page_width - 50.0
+    raw_blocks = page_dict.get("blocks", [])
 
-    for b in blocks:
-        if b[6] != 0:
+    body_x0s = []
+    body_x1s = []
+    font_sizes = []
+    for b in raw_blocks:
+        if b.get("type") != 0:
             continue
-        x0, y0, x1, y1, raw_txt = b[0], b[1], b[2], b[3], b[4].strip()
+        for ln in b.get("lines", []):
+            y0, y1 = ln["bbox"][1], ln["bbox"][3]
+            if 55 < y0 < page_height - 55:
+                body_x0s.append(ln["bbox"][0])
+                body_x1s.append(ln["bbox"][2])
+                for sp in ln.get("spans", []):
+                    if sp.get("text", "").strip():
+                        font_sizes.append(round(sp.get("size", 10.0), 1))
+
+    base_left = min(body_x0s) if body_x0s else 50.0
+    base_right = max(body_x1s) if body_x1s else page_width - 50.0
+    dominant_size = max(set(font_sizes), key=font_sizes.count) if font_sizes else 10.0
+
+    for b in raw_blocks:
+        if b.get("type") != 0:
+            continue
+        lines = b.get("lines", [])
+        if not lines:
+            continue
+
+        raw_txt = "".join("".join(s.get("text", "") for s in ln.get("spans", [])) + "\n" for ln in lines).strip()
         if not raw_txt:
             continue
+
+        y0 = lines[0]["bbox"][1]
+        y1 = lines[-1]["bbox"][3]
 
         if y0 < 50 or y1 > page_height - 50:
             if re.match(r'^\d{1,5}$', raw_txt) or len(raw_txt) < 35:
@@ -225,24 +238,69 @@ def process_single_page(page_data: tuple) -> dict:
         if not cleaned:
             continue
 
-        is_left_indented = (x0 - base_left) >= 13.0
-        is_right_indented = (base_right - x1) >= 6.0
-        is_quote = is_left_indented and is_right_indented and "\n" in raw_txt
+        first_line_x0 = lines[0]["bbox"][0]
+        first_line_txt = "".join(s.get("text", "") for s in lines[0].get("spans", [])).strip()
 
-        b_type = "para"
+        block_font_sizes = [s.get("size", dominant_size) for ln in lines for s in ln.get("spans", []) if s.get("text", "").strip()]
+        avg_size = sum(block_font_sizes) / len(block_font_sizes) if block_font_sizes else dominant_size
+
+        # 1. Footnote check
+        has_number_start = bool(ORDERED_PATTERN.match(first_line_txt))
+        if has_number_start and (avg_size < dominant_size * 0.90 or y0 > page_height - 130.0):
+            parsed_blocks.append({"type": "foot-para", "text": cleaned, "y0": y0})
+            continue
+
+        # 2. Math / Equation detection (Math symbols or centered line with equation number)
+        is_centered = abs((first_line_x0 + lines[0]["bbox"][2]) / 2 - page_width / 2) < (page_width * 0.15)
+        has_math_symbols = bool(MATH_SYMBOLS_PATTERN.search(cleaned))
+        has_eq_num = bool(EQUATION_NUM_PATTERN.search(cleaned))
+
+        if has_math_symbols or (is_centered and has_eq_num) or (is_centered and len(lines) == 1 and len(cleaned) < 80 and not cleaned.endswith('.')):
+            parsed_blocks.append({"type": "equation", "text": cleaned, "y0": y0})
+            continue
+
+        # 3. Blockquote evaluation
+        all_lines_indented = all((ln["bbox"][0] - base_left) >= 13.0 for ln in lines if "".join(s.get("text", "") for s in ln.get("spans", [])).strip())
+        avg_right = sum(ln["bbox"][2] for ln in lines) / len(lines)
+        has_right_indent = (base_right - avg_right) >= 6.0
+        is_quote = len(lines) >= 2 and all_lines_indented and has_right_indent
+
         if is_quote:
-            b_type = "blockquote"
-        elif ATTRIBUTION_REGEX.match(cleaned) and (x0 - base_left > 40.0):
-            b_type = "attribution"
-        elif ORDERED_LIST_REGEX.match(cleaned):
-            if y0 > page_height - 120.0:
-                b_type = "foot-para"
-            else:
-                b_type = "ordered_item"
-        elif ITEMIZED_LIST_REGEX.match(cleaned):
-            b_type = "itemized_item"
+            parsed_blocks.append({"type": "blockquote", "text": cleaned, "y0": y0})
+            continue
 
-        parsed_blocks.append({"type": b_type, "text": cleaned, "raw": cleaned, "y0": y0})
+        # 4. Attribution line evaluation
+        if ATTRIBUTION_REGEX.match(cleaned) and (first_line_x0 - base_left > 35.0):
+            parsed_blocks.append({"type": "attribution", "text": cleaned, "y0": y0})
+            continue
+
+        # 5. List Geometry Verification
+        is_true_ordered = False
+        is_true_itemized = False
+
+        if ORDERED_PATTERN.match(first_line_txt):
+            if len(lines) >= 2:
+                second_line_x0 = lines[1]["bbox"][0]
+                if second_line_x0 > (first_line_x0 + 2.0):
+                    is_true_ordered = True
+            else:
+                if cleaned.endswith((';', ',', ':', '.')) or (first_line_x0 - base_left >= 6.0):
+                    is_true_ordered = True
+
+        elif ITEMIZED_PATTERN.match(first_line_txt):
+            if len(lines) >= 2:
+                second_line_x0 = lines[1]["bbox"][0]
+                if second_line_x0 > (first_line_x0 + 2.0):
+                    is_true_itemized = True
+            else:
+                is_true_itemized = True
+
+        if is_true_ordered:
+            parsed_blocks.append({"type": "ordered_item", "text": cleaned, "y0": y0})
+        elif is_true_itemized:
+            parsed_blocks.append({"type": "itemized_item", "text": cleaned, "y0": y0})
+        else:
+            parsed_blocks.append({"type": "para", "text": cleaned, "y0": y0})
 
     return {"page_num": str(page_idx + 1), "blocks": parsed_blocks}
 
@@ -342,6 +400,27 @@ def parse_full_pdf(pdf_path: str, output_xml_path: str, doi="10.5040/97982165004
                 current_ordered = current_itemized = current_quote = None
                 fp = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}foot-para")
                 fp.text = txt
+                continue
+
+            # Handle MathML Equations
+            if b_type == "equation":
+                current_ordered = current_itemized = current_quote = None
+                eq_match = EQUATION_NUM_PATTERN.match(txt)
+                
+                if eq_match:
+                    eq_content = eq_match.group(1).strip()
+                    eq_num = eq_match.group(2).strip()
+                    eq_elem = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}equation")
+                    math_elem = etree.SubElement(eq_elem, f"{{{MATHML_NS}}}math")
+                    mrow = etree.SubElement(math_elem, f"{{{MATHML_NS}}}mrow")
+                    mrow.text = eq_content
+                    # add equation number label
+                    etree.SubElement(eq_elem, f"{{{DOCBOOK_NS}}}phrase", attrib={"role": "eq-num"}).text = eq_num
+                else:
+                    eq_elem = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}informalequation")
+                    math_elem = etree.SubElement(eq_elem, f"{{{MATHML_NS}}}math")
+                    mrow = etree.SubElement(math_elem, f"{{{MATHML_NS}}}mrow")
+                    mrow.text = txt
                 continue
 
             if b_type == "ordered_item":
