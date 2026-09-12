@@ -1,52 +1,33 @@
+# -*- coding: utf-8 -*-
 import os
-import re
 import sys
-import uuid
-from datetime import datetime
-from typing import List, Dict
-import concurrent.futures
+import re
+import threading
+import multiprocessing
 import pymupdf
 from lxml import etree
-from fastapi import FastAPI, File, UploadFile, Request
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
-from fastapi.middleware.cors import CORSMiddleware
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
-if getattr(sys, 'frozen', False):
-    BASE_DIR = sys._MEIPASS
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
-UPLOADS_DIR = os.path.join(os.getcwd(), "uploads")
-OUTPUTS_DIR = os.path.join(os.getcwd(), "outputs")
-
-os.makedirs(UPLOADS_DIR, exist_ok=True)
-os.makedirs(OUTPUTS_DIR, exist_ok=True)
-
-app = FastAPI(title="DocBook 5.1 XML Studio")
-
-# Enable CORS for Salesforce LWC integration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Restrict to your Salesforce domain in production if needed
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-templates = Jinja2Templates(directory=TEMPLATES_DIR)
-
+# DocBook 5.0 Namespaces
 DOCBOOK_NS = "http://docbook.org/ns/docbook"
-MATHML_NS = "http://www.w3.org/1998/Math/MathML"
-XML_NS = "http://www.w3.org/XML/1998/namespace"
 XLINK_NS = "http://www.w3.org/1999/xlink"
+MML_NS = "http://www.w3.org/1998/Math/MathML"
+XML_NS = "http://www.w3.org/XML/1998/namespace"
 
 NS_MAP = {
     None: DOCBOOK_NS,
-    "mml": MATHML_NS,
-    "xml": XML_NS,
-    "xlink": XLINK_NS
+    "xlink": XLINK_NS,
+    "mml": MML_NS,
+    "xml": XML_NS
+}
+
+LIGATURE_MAP = {
+    "\ufb00": "ff",
+    "\ufb01": "fi",
+    "\ufb02": "fl",
+    "\ufb03": "ffi",
+    "\ufb04": "ffl"
 }
 
 ROMAN_TO_NUM = {
@@ -54,510 +35,504 @@ ROMAN_TO_NUM = {
     "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10
 }
 
-PORTUGUESE_PRONOUNS_AND_SUFFIXES = {
-    "se", "me", "te", "nos", "vos", "o", "a", "os", "as", "lhe", "lhes",
-    "lo", "la", "los", "las", "no", "na", "nos", "nas"
-}
-
 VALID_COMPOUND_WORDS = {
     "point", "aware", "driven", "based", "level", "order", "state", "rate",
     "free", "bound", "scale", "wise", "width", "time", "domain", "end",
     "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-    "ten", "first", "second", "third", "long", "short", "wide", "side", "line",
-    "type", "fold", "page", "step", "established", "lei", "padrao", "padroes"
+    "ten", "first", "second", "third", "can", "catch", "as", "known", "built",
+    "long", "short", "wide", "side", "line", "type", "fold", "page", "step", "established"
 }
 
 NUMBER_PREFIXES = {
-    "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "well", "all",
-    "ex", "vice", "pos", "pre", "pro", "sub", "super", "anti"
+    "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "well", "all"
 }
 
 PUNCTUATION_ENTITIES = {
     "&#x201C;", "&#x201D;", "&#x2018;", "&#x2019;", "&#x2013;", "&#x2014;", 
-    "&#x2022;", "&#x2212;", "&#x2264;", "&#x2265;", "&#x2208;"
+    "&#x2022;", "&#x2212;", "&#x2264;", "&#x2265;", "&#x2208;", "&#x0026;"
 }
 
 STANDALONE_WORDS = {
     "sich", "und", "der", "die", "das", "ein", "eine", "mit", "von", "zu",
     "auf", "im", "in", "den", "dem", "des", "nicht", "auch", "als", "an",
-    "the", "and", "a", "an", "of", "in", "to", "for", "with", "on", "at",
-    "de", "do", "da", "dos", "das", "em", "um", "uma", "com", "por", "para", "ou", "e"
+    "the", "and", "a", "an", "of", "in", "to", "for", "with", "on", "at"
 }
 
-ORDERED_PATTERN = re.compile(r'^\s*(\d+)[\.\)]\s+(.*)', re.DOTALL)
-ITEMIZED_PATTERN = re.compile(r'^\s*(?:[•\*\u2022\u25E6\u2043\u2219]|&#x2022;|-|–|—)\s+(.*)', re.DOTALL)
-ATTRIBUTION_REGEX = re.compile(r'^\s*(?:—|&#x2014;|–|&#x2013;|--)\s*(.*)', re.DOTALL)
-EQUATION_NUM_PATTERN = re.compile(r'^(.*)\s+(\(\d+\))\s*$')
-MATH_SYMBOLS_PATTERN = re.compile(r'[∑∫∂∇∏±≤≥≈≠∈∀∃⊂∪∩×÷²³√]')
+SPEAKER_LABEL_REGEX = re.compile(r'^[A-Z0-9]{1,10}\s*:\s+')
 
-RE_CHAPTER = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
-RE_SEC = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
-RE_SUBSEC = re.compile(r'^([A-Z])\.\s+(.*)')
-RE_LIGATURES = {ord(k): v for k, v in {"\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi", "\ufb04": "ffl"}.items()}
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
-def clean_to_hex_entities(text: str) -> str:
+def clean_to_hex_entities(text):
     if not text:
         return ""
-    text = text.translate(RE_LIGATURES)
+    for lig, replacement in LIGATURE_MAP.items():
+        text = text.replace(lig, replacement)
+
     out_chars = []
     for char in text:
         cp = ord(char)
         if cp > 127:
-            out_chars.append(f"&#x{cp:04X};" if cp <= 0xFFFF else f"&#x{cp:06X};")
+            if cp <= 0xFFFF:
+                out_chars.append(f"&#x{cp:04X};")
+            else:
+                out_chars.append(f"&#x{cp:06X};")
         else:
             out_chars.append(char)
     text = "".join(out_chars)
+
     valid_xml = re.compile(r'[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]')
     return valid_xml.sub('', text)
 
-def fix_hyphenated_words(text: str) -> str:
+def smart_title_case(text):
     if not text:
         return ""
-    text = re.sub(r'\b(inter|intra|pre|post|macro|micro)and\b', r'\1- and', text, flags=re.IGNORECASE)
-    text = re.sub(r'\b(inter|intra|pre|post|macro|micro)or\b', r'\1- or', text, flags=re.IGNORECASE)
+    minor_words = {"and", "or", "but", "a", "an", "the", "as", "at", "by", "for", "in", "of", "on", "per", "to", "via"}
+    words = text.split()
+    res = []
+    for i, w in enumerate(words):
+        core = re.sub(r'[^a-zA-Z]', '', w).lower()
+        if i > 0 and core in minor_words:
+            res.append(w.lower())
+        else:
+            res.append(w.capitalize())
+    return " ".join(res)
+
+def fix_hyphenated_words(text):
+    if not text:
+        return ""
+
     text = text.replace('\u00ad', '').replace('\xad', '')
 
     def line_break_replacer(match):
-        prefix, suffix = match.group(1), match.group(3)
-        p_low, s_low = prefix.lower(), suffix.lower()
-        if s_low in {"and", "or", "to", "und", "e", "ou"}:
-            return f"{prefix}- {suffix}"
-        if s_low in PORTUGUESE_PRONOUNS_AND_SUFFIXES or s_low in VALID_COMPOUND_WORDS or p_low in NUMBER_PREFIXES:
+        prefix = match.group(1)
+        suffix = match.group(2)
+        if prefix.lower() in NUMBER_PREFIXES or suffix.lower() in VALID_COMPOUND_WORDS:
             return f"{prefix}-{suffix}"
-        return f"{prefix}{suffix}"
+        return prefix + suffix
 
-    return re.sub(r'([a-zA-ZÀ-ÿ]{2,})([-‐‑])\s+([a-zA-ZÀ-ÿ]{2,})', line_break_replacer, text)
+    text = re.sub(r'([a-zA-Z]{2,})[-‐‑]\s+([a-zA-Z]{2,})', line_break_replacer, text)
+    return text
 
-def fix_missing_boundary_spaces(text: str) -> str:
+def fix_missing_boundary_spaces(text):
     if not text:
         return ""
-    text = re.sub(r'([,;])([A-Za-zÀ-ÿ])', r'\1 \2', text)
+
+    text = re.sub(r'([,;])([A-Za-z])', r'\1 \2', text)
     text = re.sub(r'&#x201C;\s+', '&#x201C;', text)
     text = re.sub(r'\s+&#x201D;', '&#x201D;', text)
-    text = re.sub(r'(&#x2019;|\')\s*(s|t|d|m|re|ve|ll|he|em)\b', r'\1\2', text, flags=re.IGNORECASE)
+    text = re.sub(r'&#x2019;\s*s\b', '&#x2019;s', text)
+    text = re.sub(r"'\s*s\b", "'s", text)
     text = re.sub(r'\s*&#x2013;\s*', '&#x2013;', text)
     text = re.sub(r'\s*&#x2014;\s*', '&#x2014;', text)
-    text = re.sub(r'(&#x201D;|"|\))([A-Za-zÀ-ÿ])', r'\1 \2', text)
-    text = re.sub(r'([A-Za-zÀ-ÿ])(&#x201C;|"|\()', r'\1 \2', text)
+    text = re.sub(r'(&#x201D;|"|\))([A-Za-z])', r'\1 \2', text)
+    text = re.sub(r'([A-Za-z])(&#x201C;|"|\()', r'\1 \2', text)
 
     def clean_intra_word_after(match):
-        ent, suffix = match.group(1), match.group(2)
-        if ent in {"&#x2019;", "&#x0027;"}:
-            return f"{ent}{suffix}"
-        if ent in PUNCTUATION_ENTITIES or suffix.lower() in STANDALONE_WORDS:
+        ent = match.group(1)
+        suffix = match.group(2)
+        if ent in PUNCTUATION_ENTITIES:
+            return f"{ent} {suffix}"
+        if suffix.lower() in STANDALONE_WORDS:
             return f"{ent} {suffix}"
         if len(suffix) <= 5 and suffix.islower():
             return f"{ent}{suffix}"
         return f"{ent} {suffix}"
 
-    text = re.sub(r'(&#x[0-9A-Fa-f]+;)[ \t]+([a-zA-ZÀ-ÿ]{1,10})', clean_intra_word_after, text)
+    text = re.sub(r'(&#x[0-9A-Fa-f]+;)[ \t]+([a-zA-Z]{1,10})', clean_intra_word_after, text)
 
     def clean_intra_word_before(match):
-        prefix, ent = match.group(1), match.group(2)
-        if ent in PUNCTUATION_ENTITIES or prefix.lower() in STANDALONE_WORDS:
+        prefix = match.group(1)
+        ent = match.group(2)
+        if ent in PUNCTUATION_ENTITIES:
+            return f"{prefix} {ent}"
+        if prefix.lower() in STANDALONE_WORDS:
             return f"{prefix} {ent}"
         if len(prefix) <= 4 and prefix.islower():
             return f"{prefix}{ent}"
         return f"{prefix} {ent}"
 
-    text = re.sub(r'([a-zA-ZÀ-ÿ]{1,10})[ \t]+(&#x[0-9A-Fa-f]+;)', clean_intra_word_before, text)
-    return re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'([a-zA-Z]{1,10})[ \t]+(&#x[0-9A-Fa-f]+;)', clean_intra_word_before, text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    return text
 
-def fast_clean_text(text: str) -> str:
-    if not text:
-        return ""
-    text = clean_to_hex_entities(text)
-    text = fix_hyphenated_words(text)
-    text = fix_missing_boundary_spaces(text)
-    return text.strip()
-
-def post_process_clean_xml(xml_str: str) -> str:
+def post_process_clean_xml(xml_str):
     if not xml_str:
         return ""
+    
     xml_str = re.sub(r'&amp;#x([0-9A-Fa-f]+);', r'&#x\1;', xml_str)
     xml_str = re.sub(r'&#x00A0;', ' ', xml_str)
+    
+    xml_str = xml_str.replace("’", "&#x2019;")
+    xml_str = xml_str.replace("‘", "&#x2018;")
+    xml_str = xml_str.replace("“", "&#x201C;")
+    xml_str = xml_str.replace("”", "&#x201D;")
+    xml_str = xml_str.replace("–", "&#x2013;")
+    xml_str = xml_str.replace("—", "&#x2014;")
+
     xml_str = re.sub(r'[ \t]+</para>', '</para>', xml_str)
-    xml_str = re.sub(r'[ \t]+</foot-para>', '</foot-para>', xml_str)
-    xml_str = re.sub(r'[ \t]+</equation>', '</equation>', xml_str)
-    xml_str = re.sub(r'[ \t]+</informalequation>', '</informalequation>', xml_str)
-    xml_str = re.sub(r'[ \t]+</sect1>', '</sect1>', xml_str)
-    xml_str = re.sub(r'[ \t]+</sect2>', '</sect2>', xml_str)
-    xml_str = re.sub(r'[ \t]+</chapter>', '</chapter>', xml_str)
     xml_str = re.sub(r'[ \t]+</title>', '</title>', xml_str)
-    xml_str = re.sub(r'[ \t]+</attribution>', '</attribution>', xml_str)
-    xml_str = re.sub(r'[ \t]+</blockquote>', '</blockquote>', xml_str)
-    xml_str = re.sub(r'[ \t]+</listitem>', '</listitem>', xml_str)
-    xml_str = re.sub(r'[ \t]+</orderedlist>', '</orderedlist>', xml_str)
-    xml_str = re.sub(r'[ \t]+</itemizedlist>', '</itemizedlist>', xml_str)
+    xml_str = re.sub(r'<para>[ \t]+', '<para>', xml_str)
+    xml_str = re.sub(r'<title>[ \t]+', '<title>', xml_str)
+    xml_str = re.sub(r'&#x201C;\s+', '&#x201C;', xml_str)
+    xml_str = re.sub(r'\s+&#x201D;', '&#x201D;', xml_str)
+    xml_str = re.sub(r'&#x2019;\s+s\b', '&#x2019;s', xml_str)
+    xml_str = re.sub(r'\s*&#x2013;\s*', '&#x2013;', xml_str)
+    xml_str = re.sub(r'\s*&#x2014;\s*', '&#x2014;', xml_str)
+
+    xml_str = re.sub(r'<para\s*/>', '', xml_str)
     xml_str = re.sub(r'<para>\s*</para>', '', xml_str)
-    xml_str = re.sub(r'<foot-para>\s*</foot-para>', '', xml_str)
-    xml_str = re.sub(r'<blockquote>\s*</blockquote>', '', xml_str)
     return xml_str
 
-def process_single_page(page_data: tuple) -> dict:
-    pdf_path, page_idx = page_data
-    doc = pymupdf.open(pdf_path)
-    page = doc[page_idx]
-    page_rect = page.rect
-    page_width = page_rect.width
-    page_height = page_rect.height
+def merge_consecutive_styled_spans(span_list):
+    if not span_list:
+        return []
 
-    page_dict = page.get_text("dict")
-    doc.close()
+    merged = []
+    current_text = ""
+    current_style = None
 
-    parsed_blocks = []
-    raw_blocks = page_dict.get("blocks", [])
-
-    body_x0s = []
-    body_x1s = []
-    font_sizes = []
-    for b in raw_blocks:
-        if b.get("type") != 0:
-            continue
-        for ln in b.get("lines", []):
-            y0, y1 = ln["bbox"][1], ln["bbox"][3]
-            if 55 < y0 < page_height - 55:
-                body_x0s.append(ln["bbox"][0])
-                body_x1s.append(ln["bbox"][2])
-                for sp in ln.get("spans", []):
-                    if sp.get("text", "").strip():
-                        font_sizes.append(round(sp.get("size", 10.0), 1))
-
-    base_left = min(body_x0s) if body_x0s else 50.0
-    base_right = max(body_x1s) if body_x1s else page_width - 50.0
-    dominant_size = max(set(font_sizes), key=font_sizes.count) if font_sizes else 10.0
-
-    for b in raw_blocks:
-        if b.get("type") != 0:
-            continue
-        lines = b.get("lines", [])
-        if not lines:
+    for span in span_list:
+        text = clean_to_hex_entities(span.get("text", ""))
+        text = fix_hyphenated_words(text)
+        text = fix_missing_boundary_spaces(text)
+        if not text:
             continue
 
-        raw_txt = "".join("".join(s.get("text", "") for s in ln.get("spans", [])) + "\n" for ln in lines).strip()
-        if not raw_txt:
+        font = span.get("font", "").lower()
+        flags = span.get("flags", 0)
+        pos_type = span.get("pos_type", "regular")
+
+        is_bold = (flags & 2**4) != 0 or "bold" in font or "black" in font
+        is_italic = (flags & 2**1) != 0 or "italic" in font or "oblique" in font
+
+        style_parts = []
+        if pos_type in ("sup", "sub"):
+            style_parts.append(pos_type)
+        if is_bold:
+            style_parts.append("bold")
+        if is_italic:
+            style_parts.append("italic")
+
+        style = "_".join(style_parts) if style_parts else "regular"
+
+        if text.isspace() and current_style is not None:
+            current_text += text
             continue
 
-        y0 = lines[0]["bbox"][1]
-        y1 = lines[-1]["bbox"][3]
-
-        if y0 < 50 or y1 > page_height - 50:
-            if re.match(r'^\d{1,5}$', raw_txt) or len(raw_txt) < 35:
-                continue
-
-        cleaned = fast_clean_text(raw_txt)
-        if not cleaned:
-            continue
-
-        first_line_x0 = lines[0]["bbox"][0]
-        first_line_txt = "".join(s.get("text", "") for s in lines[0].get("spans", [])).strip()
-
-        block_font_sizes = [s.get("size", dominant_size) for ln in lines for s in ln.get("spans", []) if s.get("text", "").strip()]
-        avg_size = sum(block_font_sizes) / len(block_font_sizes) if block_font_sizes else dominant_size
-
-        # 1. Footnote check
-        has_number_start = bool(ORDERED_PATTERN.match(first_line_txt))
-        if has_number_start and (avg_size < dominant_size * 0.90 or y0 > page_height - 130.0):
-            parsed_blocks.append({"type": "foot-para", "text": cleaned, "y0": y0})
-            continue
-
-        # 2. Math / Equation detection
-        is_centered = abs((first_line_x0 + lines[0]["bbox"][2]) / 2 - page_width / 2) < (page_width * 0.15)
-        has_math_symbols = bool(MATH_SYMBOLS_PATTERN.search(cleaned))
-        has_eq_num = bool(EQUATION_NUM_PATTERN.search(cleaned))
-
-        if has_math_symbols or (is_centered and has_eq_num) or (is_centered and len(lines) == 1 and len(cleaned) < 80 and not cleaned.endswith('.')):
-            parsed_blocks.append({"type": "equation", "text": cleaned, "y0": y0})
-            continue
-
-        # 3. Blockquote evaluation
-        all_lines_indented = all((ln["bbox"][0] - base_left) >= 13.0 for ln in lines if "".join(s.get("text", "") for s in ln.get("spans", [])).strip())
-        avg_right = sum(ln["bbox"][2] for ln in lines) / len(lines)
-        has_right_indent = (base_right - avg_right) >= 6.0
-        is_quote = len(lines) >= 2 and all_lines_indented and has_right_indent
-
-        if is_quote:
-            parsed_blocks.append({"type": "blockquote", "text": cleaned, "y0": y0})
-            continue
-
-        # 4. Attribution line evaluation
-        if ATTRIBUTION_REGEX.match(cleaned) and (first_line_x0 - base_left > 35.0):
-            parsed_blocks.append({"type": "attribution", "text": cleaned, "y0": y0})
-            continue
-
-        # 5. Strict List Geometry Verification
-        is_true_ordered = False
-        is_true_itemized = False
-
-        if ORDERED_PATTERN.match(first_line_txt):
-            if len(lines) >= 2:
-                second_line_x0 = lines[1]["bbox"][0]
-                if second_line_x0 > (first_line_x0 + 2.0):
-                    is_true_ordered = True
-            else:
-                if cleaned.endswith((';', ',', ':', '.')) or (first_line_x0 - base_left >= 6.0):
-                    is_true_ordered = True
-
-        elif ITEMIZED_PATTERN.match(first_line_txt):
-            if len(lines) >= 2:
-                second_line_x0 = lines[1]["bbox"][0]
-                if second_line_x0 > (first_line_x0 + 2.0):
-                    is_true_itemized = True
-            else:
-                is_true_itemized = True
-
-        if is_true_ordered:
-            parsed_blocks.append({"type": "ordered_item", "text": cleaned, "y0": y0})
-        elif is_true_itemized:
-            parsed_blocks.append({"type": "itemized_item", "text": cleaned, "y0": y0})
+        if current_style is None:
+            current_style = style
+            current_text = text
+        elif current_style == style:
+            current_text += text
         else:
-            parsed_blocks.append({"type": "para", "text": cleaned, "y0": y0})
+            if current_text:
+                merged.append({"style": current_style, "text": current_text})
+            current_style = style
+            current_text = text
 
-    return {"page_num": str(page_idx + 1), "blocks": parsed_blocks}
+    if current_text:
+        merged.append({"style": current_style, "text": current_text})
 
-def parse_full_pdf(pdf_path: str, output_xml_path: str, doi="10.5040/9798216500421", book_title="Monograph Document"):
+    return merged
+
+def append_styled_spans_to_node(target_elem, span_list, default_ns=DOCBOOK_NS):
+    merged_spans = merge_consecutive_styled_spans(span_list)
+
+    for item in merged_spans:
+        raw_text = item["text"]
+        style = item["style"]
+
+        if not raw_text:
+            continue
+
+        leading_ws = len(raw_text) - len(raw_text.lstrip(' '))
+        trailing_ws = len(raw_text) - len(raw_text.rstrip(' '))
+        core_text = raw_text.strip(' ')
+
+        if not core_text:
+            if len(target_elem) > 0:
+                target_elem[-1].tail = (target_elem[-1].tail or "") + raw_text
+            else:
+                target_elem.text = (target_elem.text or "") + raw_text
+            continue
+
+        if leading_ws > 0:
+            lead_str = " " * leading_ws
+            if len(target_elem) > 0:
+                target_elem[-1].tail = (target_elem[-1].tail or "") + lead_str
+            else:
+                target_elem.text = (target_elem.text or "") + lead_str
+
+        container_elem = None
+        leaf_node = None
+
+        if "sup" in style or "sub" in style or "bold" in style or "italic" in style:
+            curr_elem = target_elem
+            if "sup" in style:
+                curr_elem = etree.SubElement(curr_elem, f"{{{default_ns}}}superscript")
+            elif "sub" in style:
+                curr_elem = etree.SubElement(curr_elem, f"{{{default_ns}}}subscript")
+            
+            if "bold" in style:
+                curr_elem = etree.SubElement(curr_elem, f"{{{default_ns}}}emphasis", attrib={"role": "bold"})
+            if "italic" in style:
+                curr_elem = etree.SubElement(curr_elem, f"{{{default_ns}}}emphasis", attrib={"role": "italic"})
+
+            container_elem = target_elem[-1]
+            leaf_node = curr_elem
+        else:
+            leaf_node = target_elem
+
+        if len(leaf_node) > 0:
+            if leaf_node[-1].tail:
+                leaf_node[-1].tail += core_text
+            else:
+                leaf_node[-1].tail = core_text
+        else:
+            leaf_node.text = (leaf_node.text or "") + core_text
+
+        if trailing_ws > 0:
+            trail_str = " " * trailing_ws
+            if container_elem is not None:
+                container_elem.tail = (container_elem.tail or "") + trail_str
+            else:
+                if len(target_elem) > 0:
+                    target_elem[-1].tail = (target_elem[-1].tail or "") + trail_str
+                else:
+                    target_elem.text = (target_elem.text or "") + trail_str
+
+def is_actual_running_header(line_text, y0, page_height):
+    t = line_text.strip()
+    if not t:
+        return True
+    if y0 < 55 or y0 > (page_height - 55):
+        if re.search(r'^(?:\d+\s+)?Chapter\s+\d+', t, re.IGNORECASE) or re.search(r'Chapter\s+\d+\s+\d+$', t, re.IGNORECASE):
+            return True
+        if re.match(r'^\d{1,5}$', t):
+            return True
+        if len(t) < 45 and not t.endswith('.'):
+            return True
+    return False
+
+def extract_exact_page_number(page, last_confirmed_page):
+    page_dict = page.get_text("dict")
+    page_width = page.rect.width
+    page_height = page.rect.height
+    detected_folio = None
+
+    for block in page_dict.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            x0, y0, x1, y1 = line["bbox"]
+            if y0 < 55 or y1 > page_height - 55:
+                line_text = "".join([s.get("text", "") for s in line.get("spans", [])]).strip()
+                if not line_text:
+                    continue
+                if line_text.isdigit():
+                    val = int(line_text)
+                    if 1 <= val <= 99999:
+                        detected_folio = val
+                        break
+                left_match = re.match(r'^(\d{1,5})\b', line_text)
+                if left_match and x0 < page_width * 0.40:
+                    detected_folio = int(left_match.group(1))
+                    break
+                right_match = re.search(r'\b(\d{1,5})$', line_text)
+                if right_match and x1 > page_width * 0.60:
+                    detected_folio = int(right_match.group(1))
+                    break
+        if detected_folio is not None:
+            break
+
+    if detected_folio is None:
+        detected_folio = (last_confirmed_page + 1) if last_confirmed_page is not None else (page.number + 1)
+
+    return detected_folio
+
+def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
     doc = pymupdf.open(pdf_path)
     total_pages = len(doc)
-    doc.close()
-
-    tasks = [(pdf_path, idx) for idx in range(total_pages)]
-    max_workers = min(os.cpu_count() or 4, 8)
+    page_records = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        page_records = list(executor.map(process_single_page, tasks))
+    chapter_regex = re.compile(r'^(CHAPTER\s+\d+|ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|ELEVEN|TWELVE)\b', re.IGNORECASE)
+    sec_regex = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
+    last_folio = None
+
+    for idx, page in enumerate(doc, 1):
+        if status_callback:
+            status_callback(f"Extracting layout on page {idx}/{total_pages}...")
+
+        detected_page_folio = extract_exact_page_number(page, last_folio)
+        last_folio = detected_page_folio
+
+        blocks_list = []
+        page_dict = page.get_text("dict")
+        page_height = page.rect.height
+        page_blocks = page_dict.get("blocks", [])
+
+        text_x0s = [b["bbox"][0] for b in page_blocks if b.get("type") == 0 and b.get("lines")]
+        column_base_x0 = min(text_x0s) if text_x0s else 50.0
+
+        for block in page_blocks:
+            if block.get("type") != 0:
+                continue
+            lines = block.get("lines", [])
+            if not lines:
+                continue
+
+            current_spans = []
+            block_x0 = block["bbox"][0]
+            base_x0 = lines[0]["bbox"][0]
+            
+            is_blockquote = (block_x0 - column_base_x0) > 30.0
+            is_sidebar = (block_x0 - column_base_x0) > 18.0 and not is_blockquote
+            is_indented = (base_x0 - column_base_x0) > 4.0
+
+            prev_line_y1 = None
+            prev_line_height = 12.0
+
+            for line in lines:
+                y0, y1 = line["bbox"][1], line["bbox"][3]
+                line_height = y1 - y0
+                line_spans = line.get("spans", [])
+                if not line_spans:
+                    continue
+
+                full_line_text = clean_to_hex_entities("".join([s["text"] for s in line_spans])).strip()
+                if not full_line_text:
+                    continue
+
+                if is_actual_running_header(full_line_text, y0, page_height):
+                    continue
+
+                sizes = [s["size"] for s in line_spans if s.get("text", "").strip()]
+                dominant_size = max(set(sizes), key=sizes.count) if sizes else 10.0
+                baseline_y = line_spans[0]["origin"][1] if "origin" in line_spans[0] else line["bbox"][3]
+
+                line_x0 = line["bbox"][0]
+                line_is_indented = (line_x0 - base_x0) > 4.0
+                has_vertical_block_gap = (prev_line_y1 is not None) and ((y0 - prev_line_y1) > (prev_line_height * 0.35))
+
+                if (line_is_indented or has_vertical_block_gap) and current_spans:
+                    b_type = "blockquote" if is_blockquote else ("sidebar" if is_sidebar else "para")
+                    blocks_list.append({
+                        "type": b_type, 
+                        "spans": current_spans, 
+                        "raw": "".join([s["text"] for s in current_spans]).strip(),
+                        "is_indented": is_indented
+                    })
+                    current_spans = []
+                    base_x0 = line_x0
+
+                raw_line_end = "".join([s.get("text", "") for s in line_spans]).rstrip()
+                line_ends_with_hyphen = raw_line_end.endswith(('-', '‐', '‑', '\xad'))
+
+                for s_i, span in enumerate(line_spans):
+                    span_copy = dict(span)
+                    s_text = span_copy.get("text", "")
+                    if not s_text:
+                        continue
+
+                    if line_ends_with_hyphen and s_i == len(line_spans) - 1:
+                        span_copy["text"] = re.sub(r'[-‐‑\xad]\s*$', '', span_copy["text"])
+
+                    s_size = span_copy.get("size", dominant_size)
+                    s_origin_y = span_copy.get("origin", (0, baseline_y))[1]
+
+                    if s_size < dominant_size * 0.85:
+                        span_copy["pos_type"] = "sup" if s_origin_y < baseline_y - 1.2 else ("sub" if s_origin_y > baseline_y + 1.0 else "regular")
+                    else:
+                        span_copy["pos_type"] = "regular"
+
+                    if s_i < len(line_spans) - 1:
+                        next_span_x0 = line_spans[s_i + 1]["bbox"][0]
+                        curr_span_x1 = span["bbox"][2]
+                        if (next_span_x0 - curr_span_x1) > 2.0 and not span_copy["text"].endswith(" "):
+                            span_copy["text"] += " "
+
+                    current_spans.append(span_copy)
+
+                if current_spans and not line_ends_with_hyphen:
+                    if not current_spans[-1]["text"].endswith(" "):
+                        current_spans.append({"text": " ", "flags": 0, "size": dominant_size, "font": "", "pos_type": "regular"})
+
+                is_chap = bool(chapter_regex.match(full_line_text) and len(full_line_text) < 40)
+                is_sec = bool(sec_regex.match(full_line_text))
+                is_caps_title = bool(
+                    full_line_text.isupper() 
+                    and any(c.isalpha() for c in full_line_text) 
+                    and 3 < len(full_line_text) < 120 
+                    and not full_line_text.endswith('.')
+                    and max(sizes, default=0) >= dominant_size
+                )
+
+                if is_chap or is_sec or is_caps_title:
+                    if current_spans:
+                        b_type = "blockquote" if is_blockquote else ("sidebar" if is_sidebar else "para")
+                        blocks_list.append({
+                            "type": b_type, 
+                            "spans": current_spans, 
+                            "raw": "".join([s["text"] for s in current_spans]).strip(),
+                            "is_indented": is_indented
+                        })
+                        current_spans = []
+                    
+                    kind = "chap_title" if is_chap else "heading"
+                    blocks_list.append({"type": kind, "spans": line_spans, "raw": full_line_text})
+                    base_x0 = line_x0
+                    prev_line_y1 = y1
+                    prev_line_height = line_height
+                    continue
+
+                prev_line_y1 = y1
+                prev_line_height = line_height
+
+            if current_spans:
+                b_type = "blockquote" if is_blockquote else ("sidebar" if is_sidebar else "para")
+                blocks_list.append({
+                    "type": b_type, 
+                    "spans": current_spans, 
+                    "raw": "".join([s["text"] for s in current_spans]).strip(),
+                    "is_indented": is_indented
+                })
+
+        page_records.append({"page_num": str(detected_page_folio), "blocks": blocks_list})
+
+    return page_records
+
+def parse_full_pdf(pdf_path, output_xml_path, doi, book_title, id_prefix, status_callback=None):
+    if status_callback:
+        status_callback("Analyzing PDF layout...")
+    page_records = extract_pdf_pages_clean_header(pdf_path, status_callback)
+
+    if status_callback:
+        status_callback("Building DocBook XML document...")
+
+    prefix = id_prefix.strip() if id_prefix.strip() else ("b-" + re.sub(r'[^a-zA-Z0-9]', '', os.path.splitext(os.path.basename(output_xml_path))[0]))
+    id_counter = 1
+
+    def next_id():
+        nonlocal id_counter
+        curr = f"{prefix}-{id_counter:07d}"
+        id_counter += 1
+        return curr
 
     root = etree.Element(
         f"{{{DOCBOOK_NS}}}book",
         attrib={
-            "version": "5.1",
-            f"{{{XML_NS}}}lang": "en"
+            "version": "5.0",
+            f"{{{XML_NS}}}lang": "en",
+            "role": "fullText",
+            f"{{{XML_NS}}}id": prefix
         },
         nsmap=NS_MAP
     )
 
-    info_elem = etree.SubElement(root, f"{{{DOCBOOK_NS}}}info")
-    etree.SubElement(info_elem, f"{{{DOCBOOK_NS}}}title").text = book_title
-    etree.SubElement(info_elem, "object-id", attrib={"pub-id-type": "doi"}).text = doi
-
-    current_chapter = None
-    current_sect1 = None
-    current_sect2 = None
-    current_ordered = None
-    current_itemized = None
-    current_quote = None
-    chapter_count = 0
-    sec_num = 1
-    current_subsec_char = "a"
-
-    for precord in page_records:
-        page_num = precord["page_num"]
-
-        for block in precord["blocks"]:
-            txt = block["text"]
-            b_type = block["type"]
-
-            chap_match = RE_CHAPTER.match(txt)
-            if chap_match:
-                chapter_count += 1
-                c_num = chap_match.group(1) or chap_match.group(3) or str(chapter_count)
-                c_title = chap_match.group(2).strip() if chap_match.group(2) else f"Chapter {c_num}"
-
-                current_chapter = etree.SubElement(root, f"{{{DOCBOOK_NS}}}chapter")
-                current_chapter.set(f"{{{XML_NS}}}id", f"chap-{chapter_count}")
-                current_chapter.append(etree.ProcessingInstruction("pb", f'n="{page_num}"'))
-                
-                c_info = etree.SubElement(current_chapter, f"{{{DOCBOOK_NS}}}info")
-                etree.SubElement(c_info, f"{{{DOCBOOK_NS}}}title").text = c_title
-                
-                current_sect1 = current_sect2 = current_ordered = current_itemized = current_quote = None
-                continue
-
-            if current_chapter is None:
-                chapter_count += 1
-                current_chapter = etree.SubElement(root, f"{{{DOCBOOK_NS}}}chapter")
-                current_chapter.set(f"{{{XML_NS}}}id", f"chap-{chapter_count}")
-                current_chapter.append(etree.ProcessingInstruction("pb", f'n="{page_num}"'))
-                c_info = etree.SubElement(current_chapter, f"{{{DOCBOOK_NS}}}info")
-                etree.SubElement(c_info, f"{{{DOCBOOK_NS}}}title").text = "Introduction"
-
-            sec_match = RE_SEC.match(txt)
-            if sec_match:
-                roman_val = sec_match.group(1).upper()
-                sec_num = ROMAN_TO_NUM.get(roman_val, sec_num + 1)
-                current_sect1 = etree.SubElement(current_chapter, f"{{{DOCBOOK_NS}}}sect1")
-                current_sect1.set(f"{{{XML_NS}}}id", f"sec-{sec_num}")
-                current_sect1.append(etree.ProcessingInstruction("pb", f'n="{page_num}"'))
-                etree.SubElement(current_sect1, f"{{{DOCBOOK_NS}}}title").text = f"{sec_match.group(1)}. {sec_match.group(2).strip()}"
-                
-                current_sect2 = current_ordered = current_itemized = current_quote = None
-                continue
-
-            parent_target = current_sect1 if current_sect1 is not None else current_chapter
-
-            subsec_match = RE_SUBSEC.match(txt)
-            if subsec_match and len(txt) < 60 and not txt.endswith(';') and not txt.endswith(','):
-                current_subsec_char = subsec_match.group(1).lower()
-                current_sect2 = etree.SubElement(parent_target, f"{{{DOCBOOK_NS}}}sect2")
-                current_sect2.set(f"{{{XML_NS}}}id", f"sec-{sec_num}-{current_subsec_char}")
-                current_sect2.append(etree.ProcessingInstruction("pb", f'n="{page_num}"'))
-                etree.SubElement(current_sect2, f"{{{DOCBOOK_NS}}}title").text = f"{subsec_match.group(1)}. {subsec_match.group(2).strip()}"
-
-                current_ordered = current_itemized = current_quote = None
-                continue
-
-            active_parent = current_sect2 if current_sect2 is not None else (current_sect1 if current_sect1 is not None else current_chapter)
-
-            if b_type == "foot-para":
-                current_ordered = current_itemized = current_quote = None
-                fp = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}foot-para")
-                fp.text = txt
-                continue
-
-            if b_type == "equation":
-                current_ordered = current_itemized = current_quote = None
-                eq_match = EQUATION_NUM_PATTERN.match(txt)
-                
-                if eq_match:
-                    eq_content = eq_match.group(1).strip()
-                    eq_num = eq_match.group(2).strip()
-                    eq_elem = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}equation")
-                    math_elem = etree.SubElement(eq_elem, f"{{{MATHML_NS}}}math")
-                    mrow = etree.SubElement(math_elem, f"{{{MATHML_NS}}}mrow")
-                    mrow.text = eq_content
-                    etree.SubElement(eq_elem, f"{{{DOCBOOK_NS}}}phrase", attrib={"role": "eq-num"}).text = eq_num
-                else:
-                    eq_elem = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}informalequation")
-                    math_elem = etree.SubElement(eq_elem, f"{{{MATHML_NS}}}math")
-                    mrow = etree.SubElement(math_elem, f"{{{MATHML_NS}}}mrow")
-                    mrow.text = txt
-                continue
-
-            if b_type == "ordered_item":
-                current_itemized = current_quote = None
-                if current_ordered is None or current_ordered.getparent() != active_parent:
-                    current_ordered = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}orderedlist")
-                li = etree.SubElement(current_ordered, f"{{{DOCBOOK_NS}}}listitem")
-                p = etree.SubElement(li, f"{{{DOCBOOK_NS}}}para")
-                p.text = re.sub(r'^\s*\d+[\.\)]\s*', '', txt)
-                continue
-
-            if b_type == "itemized_item":
-                current_ordered = current_quote = None
-                if current_itemized is None or current_itemized.getparent() != active_parent:
-                    current_itemized = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}itemizedlist")
-                li = etree.SubElement(current_itemized, f"{{{DOCBOOK_NS}}}listitem")
-                p = etree.SubElement(li, f"{{{DOCBOOK_NS}}}para")
-                p.text = re.sub(r'^\s*(?:[•\*\u2022\u25E6\u2043\u2219]|&#x2022;|-|–|—)\s*', '', txt)
-                continue
-
-            if b_type == "attribution":
-                current_ordered = current_itemized = None
-                if current_quote is None or current_quote.getparent() != active_parent:
-                    current_quote = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}blockquote")
-                att = etree.SubElement(current_quote, f"{{{DOCBOOK_NS}}}attribution", attrib={"role": "right"})
-                att.text = f"&#x2014;{re.sub(r'^\s*[-–—]+\s*', '', txt)}"
-                current_quote = None
-                continue
-
-            if b_type == "blockquote":
-                current_ordered = current_itemized = None
-                if current_quote is None or current_quote.getparent() != active_parent:
-                    current_quote = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}blockquote")
-                p = etree.SubElement(current_quote, f"{{{DOCBOOK_NS}}}para")
-                p.text = txt
-                continue
-
-            current_ordered = current_itemized = current_quote = None
-            p = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}para")
-            p.text = txt
-
-    raw_xml = etree.tostring(
-        root,
-        pretty_print=True,
-        xml_declaration=True,
-        encoding="UTF-8"
-    ).decode("utf-8")
-
-    clean_xml = post_process_clean_xml(raw_xml)
-
-    with open(output_xml_path, "w", encoding="utf-8") as f:
-        f.write(clean_xml)
-
-# -------------------------------------------------------------
-# FASTAPI ASYNC ENDPOINTS
-# -------------------------------------------------------------
-conversion_history: List[Dict] = []
-
-@app.get("/", response_class=HTMLResponse)
-async def serve_home(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
-
-@app.get("/api/history")
-async def get_history():
-    return JSONResponse(conversion_history)
-
-@app.post("/api/upload")
-async def handle_upload(file: UploadFile = File(...)):
-    file_id = str(uuid.uuid4())[:8]
-    saved_filename = f"{file_id}_{file.filename}"
-    saved_path = os.path.join(UPLOADS_DIR, saved_filename)
-
-    content = await file.read()
-    with open(saved_path, "wb") as f:
-        f.write(content)
-
-    doc = pymupdf.open(saved_path)
-    total_pages = len(doc)
-    doc.close()
-
-    new_record = {
-        "id": str(len(conversion_history) + 1),
-        "name": file.filename,
-        "date": datetime.now().strftime("%d %b %Y, %I:%M %p"),
-        "size": f"{len(content) / (1024 * 1024):.2f} MB",
-        "status": "Ready",
-        "file_id": file_id,
-        "pages": total_pages,
-        "file_path": saved_path
-    }
-    conversion_history.insert(0, new_record)
-    return JSONResponse({"status": "success", "file_info": new_record})
-
-@app.post("/api/convert/{file_id}")
-async def run_conversion(file_id: str):
-    target = next((item for item in conversion_history if item.get("file_id") == file_id), None)
-    if not target or not os.path.exists(target.get("file_path", "")):
-        return JSONResponse({"status": "error", "message": "Source file not found."}, status_code=404)
-
-    target["status"] = "Processing"
-    pdf_path = target["file_path"]
-    base_name = os.path.splitext(target["name"])[0]
-    out_xml_name = f"{base_name}.xml"
-    out_xml_path = os.path.join(OUTPUTS_DIR, f"{file_id}_{out_xml_name}")
-
-    try:
-        parse_full_pdf(pdf_path, out_xml_path, book_title=base_name)
-        target["status"] = "Done"
-        target["xml_path"] = out_xml_path
-        target["xml_filename"] = out_xml_name
-
-        return JSONResponse({
-            "status": "success",
-            "download_url": f"/api/download/{target['id']}",
-            "filename": out_xml_name
-        })
-    except Exception as err:
-        target["status"] = "Failed"
-        return JSONResponse({"status": "error", "message": str(err)}, status_code=500)
-
-@app.get("/api/download/{item_id}")
-async def download_xml_file(item_id: str):
-    target = next((item for item in conversion_history if item.get("id") == item_id), None)
-    if not target or "xml_path" not in target:
-        return JSONResponse({"status": "error", "message": "XML file not found."}, status_code=404)
-
-    return FileResponse(target["xml_path"], filename=target.get("xml_filename", "output.xml"), media_type="application/xml")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 1. Info Block
+    info_elem = etree.SubElement(root, f"{{{DOCBOOK_NS}}}info", attrib={f"{{{XML_NS}}
