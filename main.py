@@ -10,6 +10,7 @@ from lxml import etree
 from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = sys._MEIPASS
@@ -24,6 +25,16 @@ os.makedirs(UPLOADS_DIR, exist_ok=True)
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
 app = FastAPI(title="DocBook 5.1 XML Studio")
+
+# Enable CORS for Salesforce LWC integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict to your Salesforce domain in production if needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 DOCBOOK_NS = "http://docbook.org/ns/docbook"
@@ -250,7 +261,7 @@ def process_single_page(page_data: tuple) -> dict:
             parsed_blocks.append({"type": "foot-para", "text": cleaned, "y0": y0})
             continue
 
-        # 2. Math / Equation detection (Math symbols or centered line with equation number)
+        # 2. Math / Equation detection
         is_centered = abs((first_line_x0 + lines[0]["bbox"][2]) / 2 - page_width / 2) < (page_width * 0.15)
         has_math_symbols = bool(MATH_SYMBOLS_PATTERN.search(cleaned))
         has_eq_num = bool(EQUATION_NUM_PATTERN.search(cleaned))
@@ -274,7 +285,7 @@ def process_single_page(page_data: tuple) -> dict:
             parsed_blocks.append({"type": "attribution", "text": cleaned, "y0": y0})
             continue
 
-        # 5. List Geometry Verification
+        # 5. Strict List Geometry Verification
         is_true_ordered = False
         is_true_itemized = False
 
@@ -402,7 +413,6 @@ def parse_full_pdf(pdf_path: str, output_xml_path: str, doi="10.5040/97982165004
                 fp.text = txt
                 continue
 
-            # Handle MathML Equations
             if b_type == "equation":
                 current_ordered = current_itemized = current_quote = None
                 eq_match = EQUATION_NUM_PATTERN.match(txt)
@@ -414,7 +424,6 @@ def parse_full_pdf(pdf_path: str, output_xml_path: str, doi="10.5040/97982165004
                     math_elem = etree.SubElement(eq_elem, f"{{{MATHML_NS}}}math")
                     mrow = etree.SubElement(math_elem, f"{{{MATHML_NS}}}mrow")
                     mrow.text = eq_content
-                    # add equation number label
                     etree.SubElement(eq_elem, f"{{{DOCBOOK_NS}}}phrase", attrib={"role": "eq-num"}).text = eq_num
                 else:
                     eq_elem = etree.SubElement(active_parent, f"{{{DOCBOOK_NS}}}informalequation")
