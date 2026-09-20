@@ -77,9 +77,63 @@ def clean_to_hex_entities(text):
     valid_xml = re.compile(r'[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]')
     return valid_xml.sub('', text)
 
-def append_styled_spans_to_node(target_p, span_list):
+def merge_consecutive_styled_spans(span_list):
+    if not span_list:
+        return []
+
+    merged = []
+    current_text = ""
+    current_style = None
+
     for span in span_list:
-        raw_text = clean_to_hex_entities(span.get("text", ""))
+        text = clean_to_hex_entities(span.get("text", ""))
+        if not text:
+            continue
+
+        font = span.get("font", "").lower()
+        flags = span.get("flags", 0)
+        pos_type = span.get("pos_type", "regular")
+
+        is_bold = (flags & 2**4) != 0 or "bold" in font or "black" in font
+        is_italic = (flags & 2**1) != 0 or "italic" in font or "oblique" in font
+
+        style_parts = []
+        if pos_type in ("sup", "sub"):
+            style_parts.append(pos_type)
+        if is_bold:
+            style_parts.append("bold")
+        if is_italic:
+            style_parts.append("italic")
+
+        style = "_".join(style_parts) if style_parts else "regular"
+
+        if text.isspace() and current_style is not None:
+            current_text += text
+            continue
+
+        if current_style is None:
+            current_style = style
+            current_text = text
+        elif current_style == style:
+            current_text += text
+        else:
+            if current_text:
+                merged.append({"style": current_style, "text": current_text})
+            current_style = style
+            current_text = text
+
+    if current_text:
+        merged.append({"style": current_style, "text": current_text})
+
+    return merged
+
+def append_styled_spans_to_docbook_node(target_p, span_list):
+    merged_spans = merge_consecutive_styled_spans(span_list)
+
+    for item in merged_spans:
+        raw_text = item["text"]
+        style = item["style"]
+
         if not raw_text:
             continue
 
@@ -92,18 +146,65 @@ def append_styled_spans_to_node(target_p, span_list):
                     continue
                 if url_pattern.match(part):
                     full_url = part if part.startswith("http") else f"http://{part}"
-                    uri_elem = etree.SubElement(target_p, "link", attrib={f"{{{XLINK_NS}}}href": full_url})
-                    uri_sub = etree.SubElement(uri_elem, "uri")
+                    link_elem = etree.SubElement(target_p, "link", attrib={f"{{{XLINK_NS}}}href": full_url})
+                    uri_sub = etree.SubElement(link_elem, "uri")
                     uri_sub.text = part
                 else:
                     target_p.text = (target_p.text or "") + part
         else:
-            if len(target_p) > 0 and target_p[-1].tail:
-                target_p[-1].tail += raw_text
-            elif len(target_p) == 0:
-                target_p.text = (target_p.text or "") + raw_text
+            container_elem = None
+            leaf_node = None
+
+            if "sup" in style or "sub" in style or "bold" in style or "italic" in style:
+                tag_order = []
+                if "sup" in style:
+                    tag_order.append("superscript")
+                elif "sub" in style:
+                    tag_order.append("subscript")
+                
+                if "bold" in style or "italic" in style:
+                    # DocBook 5.0 uses <emphasis role="bold"> or <emphasis role="italic">
+                    emphasis_elem = etree.SubElement(target_p, "emphasis")
+                    if "bold" in style and "italic" in style:
+                        emphasis_elem.set("role", "bold-italic")
+                    elif "bold" in style:
+                        emphasis_elem.set("role", "bold")
+                    elif "italic" in style:
+                        emphasis_elem.set("role", "italic")
+                    leaf_node = emphasis_elem
+                
+                if tag_order:
+                    container_elem = etree.SubElement(target_p, tag_order[0])
+                    leaf_node = container_elem
+
+                if not leaf_node:
+                    leaf_node = target_p
             else:
-                target_p[-1].tail = (target_p[-1].tail or "") + raw_text
+                leaf_node = target_p
+
+            if len(leaf_node) > 0:
+                if leaf_node[-1].tail:
+                    leaf_node[-1].tail += raw_text
+                else:
+                    leaf_node[-1].tail = raw_text
+            else:
+                if leaf_node == target_p and target_p.text:
+                    target_p.text += raw_text
+                else:
+                    leaf_node.text = (leaf_node.text or "") + raw_text
+
+def is_actual_running_header(line_text, y0, page_height):
+    t = line_text.strip()
+    if not t:
+        return True
+    if y0 < 55 or y0 > (page_height - 55):
+        if re.search(r'^(?:\d+\s+)?Chapter\s+\d+', t, re.IGNORECASE) or re.search(r'Chapter\s+\d+\s+\d+$', t, re.IGNORECASE):
+            return True
+        if re.match(r'^\d{1,5}$', t):
+            return True
+        if len(t) < 50 and not t.endswith('.'):
+            return True
+    return False
 
 def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
     doc = pymupdf.open(pdf_path)
@@ -122,7 +223,7 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
     for page_idx, page in enumerate(doc, 1):
         if status_callback:
-            status_callback(f"Extracting layout on page {page_idx}/{total_pages}...")
+            status_callback(f"Extracting text & layout on page {page_idx}/{total_pages}...")
 
         page_height = page.rect.height
         page_blocks = page.get_text("dict").get("blocks", [])
@@ -149,6 +250,7 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
             current_spans = []
             for line_idx, line in enumerate(lines):
+                y0 = line["bbox"][1]
                 y1 = line["bbox"][3]
                 line_spans = line.get("spans", [])
                 if not line_spans:
@@ -158,12 +260,15 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                 if not full_line_text:
                     continue
 
+                if is_actual_running_header(full_line_text, y0, page_height):
+                    continue
+
                 if (chapter_regex.match(full_line_text) or sec_regex.match(full_line_text) or 
                     subsec_regex.match(full_line_text) or ref_item_regex.match(full_line_text) or 
                     full_line_text.upper().startswith("REFERENCES") or full_line_text.upper().startswith("NOTES")):
                     
                     if current_spans:
-                        blocks_list.append({"type": "para", "spans": current_spans, "raw": "".join([s["text"] for s in current_spans]).strip()})
+                        blocks_list.append({"type": "para", "spans": current_spans})
                         current_spans = []
                     
                     if full_line_text.upper().startswith("REFERENCES") or full_line_text.upper().startswith("NOTES"):
@@ -175,7 +280,7 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                 fn_match = footnote_regex.match(full_line_text)
                 if (y1 > page_height - 65) and fn_match:
                     if current_spans:
-                        blocks_list.append({"type": "para", "spans": current_spans, "raw": "".join([s["text"] for s in current_spans]).strip()})
+                        blocks_list.append({"type": "para", "spans": current_spans})
                         current_spans = []
                     blocks_list.append({"type": "footnote", "spans": line_spans, "raw": full_line_text, "label": fn_match.group(1) or "*"})
                     continue
@@ -184,7 +289,7 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                     current_spans.append(span)
 
             if current_spans:
-                blocks_list.append({"type": "para", "spans": current_spans, "raw": "".join([s["text"] for s in current_spans]).strip()})
+                blocks_list.append({"type": "para", "spans": current_spans})
 
         page_records.append({"page_num": str(detected_page_folio), "blocks": blocks_list})
 
@@ -193,11 +298,11 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
 def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journal_title="Political Economy of China–Taiwan Relations", status_callback=None):
     if status_callback:
-        status_callback("Analyzing PDF pages...")
+        status_callback("Analyzing PDF structure...")
     page_records = extract_pdf_pages_clean_header(pdf_path, status_callback)
 
     if status_callback:
-        status_callback("Building Bloomsbury Book DocBook XML structure...")
+        status_callback("Generating Bloomsbury Book DocBook 5.0 XML...")
 
     root = etree.Element(
         "book",
@@ -230,23 +335,41 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
         blocks_to_process = precord["blocks"]
 
         for block in blocks_to_process:
-            raw_txt = block["raw"]
             block_type = block.get("type", "para")
+            
+            if block_type == "heading":
+                raw_txt = block["raw"]
+                chap_match = chapter_regex.match(raw_txt)
+                if chap_match:
+                    chapter_count += 1
+                    c_num = chap_match.group(1) or chap_match.group(3) or str(chapter_count)
+                    c_title = chap_match.group(2).strip() if chap_match.group(2) else f"Chapter {c_num}"
 
-            chap_match = chapter_regex.match(raw_txt)
-            if chap_match:
-                chapter_count += 1
-                c_num = chap_match.group(1) or chap_match.group(3) or str(chapter_count)
-                c_title = chap_match.group(2).strip() if chap_match.group(2) else f"Chapter {c_num}"
+                    current_chapter = etree.SubElement(root, "chapter", attrib={f"{{{XML_NS}}}id": f"b-9798216447917-chapter{chapter_count}"})
+                    ch_info = etree.SubElement(current_chapter, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                    ch_title = etree.SubElement(ch_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                    ch_title.text = f"<?page value=\"{page_num}\"?>{c_title}"
 
-                current_chapter = etree.SubElement(root, "chapter", attrib={f"{{{XML_NS}}}id": f"b-9798216447917-chapter{chapter_count}"})
-                ch_info = etree.SubElement(current_chapter, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
-                ch_title = etree.SubElement(ch_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
-                ch_title.text = f"<?page value=\"{page_num}\"?>{c_title}"
+                    current_sec = None
+                    in_chapter_references = False
+                    continue
 
-                current_sec = None
-                in_chapter_references = False
-                continue
+                sec_match = sec_regex.match(raw_txt)
+                if sec_match:
+                    if current_chapter is None:
+                        chapter_count += 1
+                        current_chapter = etree.SubElement(root, "chapter", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-intro"})
+                        ch_info = etree.SubElement(current_chapter, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                        etree.SubElement(ch_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>Introduction"
+
+                    roman_val = sec_match.group(1).upper()
+                    sec_num = ROMAN_TO_NUM.get(roman_val, current_sec_num)
+                    current_sec_num = sec_num
+                    
+                    current_sec = etree.SubElement(current_chapter, "section", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                    sec_info = etree.SubElement(current_sec, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                    etree.SubElement(sec_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>" + sec_match.group(2).strip()
+                    continue
 
             if current_chapter is None:
                 chapter_count += 1
@@ -254,6 +377,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 ch_info = etree.SubElement(current_chapter, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
                 etree.SubElement(ch_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>Introduction"
 
+            raw_txt = block.get("raw", "")
             if block_type == "references_header" or raw_txt.upper().startswith("REFERENCES") or raw_txt.upper().startswith("NOTES"):
                 in_chapter_references = True
                 continue
@@ -273,18 +397,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 fn_elem = etree.SubElement(active_parent, "footnote", attrib={"role": "end-ch-note", "label": block.get('label', '1'), f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
                 p_fn = etree.SubElement(fn_elem, "para", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
                 p_fn.text = f"{block.get('label', '1')}.\u2002"
-                append_styled_spans_to_node(p_fn, block["spans"])
-                continue
-
-            sec_match = sec_regex.match(raw_txt)
-            if sec_match:
-                roman_val = sec_match.group(1).upper()
-                sec_num = ROMAN_TO_NUM.get(roman_val, current_sec_num)
-                current_sec_num = sec_num
-                
-                current_sec = etree.SubElement(current_chapter, "section", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
-                sec_info = etree.SubElement(current_sec, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
-                etree.SubElement(sec_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = sec_match.group(2).strip()
+                append_styled_spans_to_docbook_node(p_fn, block["spans"])
                 continue
 
             parent_target = current_sec if current_sec is not None else current_chapter
@@ -293,7 +406,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
             if page_num:
                 p_node.text = f"<?page value=\"{page_num}\"?>"
 
-            append_styled_spans_to_node(p_node, block["spans"])
+            append_styled_spans_to_docbook_node(p_node, block["spans"])
 
     doctype = '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V5.0//EN" "http://www.oasis-open.org/docbook/xml/5.0/docbook.dtd">'
     raw_xml = etree.tostring(
@@ -333,7 +446,7 @@ class UniversalConverterApp(tk.Tk):
         
         tk.Label(
             self,
-            text="PDF to DocBook 5.0 Book Structure Conversion Suite",
+            text="PDF to DocBook 5.0 Book Structure & Hex Entities Suite",
             font=("Arial", 9, "italic"),
             fg="#64748B"
         ).pack(pady=(0, 10))
