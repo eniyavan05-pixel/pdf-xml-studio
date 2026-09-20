@@ -156,15 +156,15 @@ def append_styled_spans_to_docbook_node(target_p, span_list):
             leaf_node = None
 
             if "sup" in style or "sub" in style or "bold" in style or "italic" in style:
-                tag_order = []
                 if "sup" in style:
-                    tag_order.append("superscript")
+                    container_elem = etree.SubElement(target_p, "superscript")
+                    leaf_node = container_elem
                 elif "sub" in style:
-                    tag_order.append("subscript")
-                
+                    container_elem = etree.SubElement(target_p, "subscript")
+                    leaf_node = container_elem
+
                 if "bold" in style or "italic" in style:
-                    # DocBook 5.0 uses <emphasis role="bold"> or <emphasis role="italic">
-                    emphasis_elem = etree.SubElement(target_p, "emphasis")
+                    emphasis_elem = etree.SubElement(container_elem if container_elem is not None else target_p, "emphasis")
                     if "bold" in style and "italic" in style:
                         emphasis_elem.set("role", "bold-italic")
                     elif "bold" in style:
@@ -173,10 +173,6 @@ def append_styled_spans_to_docbook_node(target_p, span_list):
                         emphasis_elem.set("role", "italic")
                     leaf_node = emphasis_elem
                 
-                if tag_order:
-                    container_elem = etree.SubElement(target_p, tag_order[0])
-                    leaf_node = container_elem
-
                 if not leaf_node:
                     leaf_node = target_p
             else:
@@ -214,6 +210,7 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
     chapter_regex = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
     sec_regex = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
     subsec_regex = re.compile(r'^([A-Z])\.\s+(.*)')
+    subsubsec_regex = re.compile(r'^(\d+)\)\s*(.*)')
     ref_item_regex = re.compile(r'^(\[?\d+\]?)\.?\s+(.*)')
     footnote_regex = re.compile(r'^(?:(\d+)\.|\*)\s+(.*)')
 
@@ -223,9 +220,10 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
     for page_idx, page in enumerate(doc, 1):
         if status_callback:
-            status_callback(f"Extracting text & layout on page {page_idx}/{total_pages}...")
+            status_callback(f"Extracting structured layout on page {page_idx}/{total_pages}...")
 
         page_height = page.rect.height
+        page_width = page.rect.width
         page_blocks = page.get_text("dict").get("blocks", [])
 
         page_full_text = page.get_text()
@@ -240,6 +238,9 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
             chapter_page_counter += 1
 
         blocks_list = []
+        text_x0s = [b["bbox"][0] for b in page_blocks if b.get("type") == 0 and b.get("lines")]
+        column_base_x0 = min(text_x0s) if text_x0s else 50.0
+
         for block in page_blocks:
             if block.get("type") != 0:
                 continue
@@ -249,6 +250,9 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                 continue
 
             current_spans = []
+            block_x0 = block["bbox"][0]
+            is_blockquote = (block_x0 - column_base_x0) > 14.0
+
             for line_idx, line in enumerate(lines):
                 y0 = line["bbox"][1]
                 y1 = line["bbox"][3]
@@ -264,15 +268,21 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                     continue
 
                 if (chapter_regex.match(full_line_text) or sec_regex.match(full_line_text) or 
-                    subsec_regex.match(full_line_text) or ref_item_regex.match(full_line_text) or 
-                    full_line_text.upper().startswith("REFERENCES") or full_line_text.upper().startswith("NOTES")):
+                    subsec_regex.match(full_line_text) or subsubsec_regex.match(full_line_text) or 
+                    ref_item_regex.match(full_line_text) or full_line_text.upper().startswith("REFERENCES") or 
+                    full_line_text.upper().startswith("NOTES")):
                     
                     if current_spans:
-                        blocks_list.append({"type": "para", "spans": current_spans})
+                        block_kind = "disp-quote" if is_blockquote else "para"
+                        blocks_list.append({"type": block_kind, "spans": current_spans})
                         current_spans = []
                     
                     if full_line_text.upper().startswith("REFERENCES") or full_line_text.upper().startswith("NOTES"):
                         blocks_list.append({"type": "references_header", "spans": line_spans, "raw": full_line_text})
+                    elif chapter_regex.match(full_line_text):
+                        blocks_list.append({"type": "chapter_title", "spans": line_spans, "raw": full_line_text})
+                    elif sec_regex.match(full_line_text):
+                        blocks_list.append({"type": "section_title", "spans": line_spans, "raw": full_line_text})
                     else:
                         blocks_list.append({"type": "heading", "spans": line_spans, "raw": full_line_text})
                     continue
@@ -280,16 +290,42 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                 fn_match = footnote_regex.match(full_line_text)
                 if (y1 > page_height - 65) and fn_match:
                     if current_spans:
-                        blocks_list.append({"type": "para", "spans": current_spans})
+                        block_kind = "disp-quote" if is_blockquote else "para"
+                        blocks_list.append({"type": block_kind, "spans": current_spans})
                         current_spans = []
                     blocks_list.append({"type": "footnote", "spans": line_spans, "raw": full_line_text, "label": fn_match.group(1) or "*"})
                     continue
 
-                for span in line_spans:
-                    current_spans.append(span)
+                for s_i, span in enumerate(line_spans):
+                    span_copy = dict(span)
+                    s_text = span_copy.get("text", "")
+                    if not s_text:
+                        continue
+
+                    sizes = [s["size"] for s in line_spans if s.get("text", "").strip()]
+                    dominant_size = max(set(sizes), key=sizes.count) if sizes else 10.0
+                    baseline_y = line_spans[0].get("origin", (0, y1))[1] if line_spans else y1
+                    s_origin_y = span_copy.get("origin", (0, baseline_y))[1]
+
+                    if span_copy.get("size", dominant_size) < dominant_size * 0.85:
+                        if s_origin_y < baseline_y - 1.2:
+                            span_copy["pos_type"] = "sup"
+                        elif s_origin_y > baseline_y + 1.0:
+                            span_copy["pos_type"] = "sub"
+                        else:
+                            span_copy["pos_type"] = "regular"
+                    else:
+                        span_copy["pos_type"] = "regular"
+
+                    current_spans.append(span_copy)
+
+                if current_spans:
+                    if not current_spans[-1]["text"].endswith(" "):
+                        current_spans.append({"text": " ", "flags": 0, "size": 10, "font": "", "pos_type": "regular"})
 
             if current_spans:
-                blocks_list.append({"type": "para", "spans": current_spans})
+                block_kind = "disp-quote" if is_blockquote else "para"
+                blocks_list.append({"type": block_kind, "spans": current_spans})
 
         page_records.append({"page_num": str(detected_page_folio), "blocks": blocks_list})
 
@@ -298,11 +334,11 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
 def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journal_title="Political Economy of China–Taiwan Relations", status_callback=None):
     if status_callback:
-        status_callback("Analyzing PDF structure...")
+        status_callback("Analyzing PDF layout and structure...")
     page_records = extract_pdf_pages_clean_header(pdf_path, status_callback)
 
     if status_callback:
-        status_callback("Generating Bloomsbury Book DocBook 5.0 XML...")
+        status_callback("Assembling Bloomsbury Book DocBook 5.0 XML tree...")
 
     root = etree.Element(
         "book",
@@ -315,19 +351,19 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
         nsmap=NS_MAP
     )
 
-    # Info / Metadata Section
     info = etree.SubElement(root, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
     etree.SubElement(info, "title", attrib={"sortas": journal_title, f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = journal_title
     etree.SubElement(info, "subtitle", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = "Origins and Development"
 
     current_chapter = None
     current_sec = None
+    current_subsec = None
     chapter_count = 0
-    current_sec_num = 1
     in_chapter_references = False
 
     chapter_regex = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
     sec_regex = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
+    subsec_regex = re.compile(r'^([A-Z])\.\s+(.*)')
     ref_item_regex = re.compile(r'^(\[?\d+\]?)\.?\s+(.*)')
 
     for precord in page_records:
@@ -337,8 +373,8 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
         for block in blocks_to_process:
             block_type = block.get("type", "para")
             
-            if block_type == "heading":
-                raw_txt = block["raw"]
+            if block_type == "chapter_title":
+                raw_txt = clean_to_hex_entities("".join([s["text"] for s in block["spans"]]))
                 chap_match = chapter_regex.match(raw_txt)
                 if chap_match:
                     chapter_count += 1
@@ -351,24 +387,24 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                     ch_title.text = f"<?page value=\"{page_num}\"?>{c_title}"
 
                     current_sec = None
+                    current_subsec = None
                     in_chapter_references = False
                     continue
 
+            if block_type == "section_title":
+                raw_txt = clean_to_hex_entities("".join([s["text"] for s in block["spans"]]))
                 sec_match = sec_regex.match(raw_txt)
                 if sec_match:
                     if current_chapter is None:
                         chapter_count += 1
-                        current_chapter = etree.SubElement(root, "chapter", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-intro"})
+                        current_chapter = etree.SubElement(root, "chapter", attrib={f"{{{XML_NS}}}id": "b-9798216353157-intro"})
                         ch_info = etree.SubElement(current_chapter, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
                         etree.SubElement(ch_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>Introduction"
 
-                    roman_val = sec_match.group(1).upper()
-                    sec_num = ROMAN_TO_NUM.get(roman_val, current_sec_num)
-                    current_sec_num = sec_num
-                    
                     current_sec = etree.SubElement(current_chapter, "section", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
                     sec_info = etree.SubElement(current_sec, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
                     etree.SubElement(sec_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>" + sec_match.group(2).strip()
+                    current_subsec = None
                     continue
 
             if current_chapter is None:
@@ -402,7 +438,23 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
 
             parent_target = current_sec if current_sec is not None else current_chapter
 
-            p_node = etree.SubElement(parent_target, "para", attrib={"role": "fullOut", f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+            # Subsection detection inside section or chapter
+            span_plain_text = "".join([s.get("text", "") for s in block["spans"]]).strip()
+            subsec_match = subsec_regex.match(span_plain_text)
+            if subsec_match and len(span_plain_text) < 80:
+                current_subsec = etree.SubElement(parent_target, "section", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                sub_info = etree.SubElement(current_subsec, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                etree.SubElement(sub_info, "title", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>" + subsec_match.group(2).strip()
+                continue
+
+            active_target = current_subsec if current_subsec is not None else parent_target
+
+            if block_type == "disp-quote":
+                quote_node = etree.SubElement(active_target, "blockquote", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+                p_node = etree.SubElement(quote_node, "para", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+            else:
+                p_node = etree.SubElement(active_target, "para", attrib={"role": "fullOut", f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+
             if page_num:
                 p_node.text = f"<?page value=\"{page_num}\"?>"
 
@@ -446,7 +498,7 @@ class UniversalConverterApp(tk.Tk):
         
         tk.Label(
             self,
-            text="PDF to DocBook 5.0 Book Structure & Hex Entities Suite",
+            text="Advanced DocBook 5.0 Book Structure & Hex Entities Suite",
             font=("Arial", 9, "italic"),
             fg="#64748B"
         ).pack(pady=(0, 10))
@@ -493,7 +545,7 @@ class UniversalConverterApp(tk.Tk):
     def set_status(self, text):
         self.after(0, lambda: self.status_label.config(text=text))
 
-    def start_conversion_thread(self):
+    def start_conversion_thread(self, event=None):
         pdf_path = self.pdf_in.get().strip()
         if not os.path.exists(pdf_path):
             return messagebox.showerror("Error", "Valid PDF file is required.")
@@ -512,7 +564,7 @@ class UniversalConverterApp(tk.Tk):
         worker = threading.Thread(
             target=self.run_conversion_worker,
             args=(pdf_path, out_fn, self.doi_in.get().strip(), self.j_in.get().strip()),
-            daemon=True
+            callback=self.set_status
         )
         worker.start()
 
