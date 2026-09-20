@@ -65,7 +65,7 @@ def clean_to_hex_entities(text):
     if not text:
         return ""
     
-    # சிங்கிள் கோட் / அபாஸ்ட்ராபி இடைவெளி திருத்தம்
+    # சிங்கிள் கோட் மற்றும் அபாஸ்ட்ராபி இடைவெளி திருத்தம் (PDF 100% துல்லியம்)
     text = re.sub(r"(&apos;|['‘])\s+", r"\1", text)
     text = re.sub(r"\s+(&apos;|['’])", r"\1", text)
 
@@ -197,14 +197,14 @@ def extract_pdf_pages_clean_header(pdf_path):
 
                 if (chapter_regex.match(full_line_text) or sec_regex.match(full_line_text) or 
                     subsec_regex.match(full_line_text) or subsubsec_regex.match(full_line_text) or 
-                    ref_item_regex.match(full_line_text) or full_line_text.upper().startswith("REFERENCES")):
+                    ref_item_regex.match(full_line_text) or full_line_text.upper().startswith("REFERENCES") or
+                    full_line_text.upper().startswith("NOTES")):
                     
                     if current_spans:
                         blocks_list.append({"type": "para", "spans": current_spans, "raw": "".join([s["text"] for s in current_spans]).strip()})
                         current_spans = []
                     
-                    # References ஐத் தனிப் பிரிவாக (Heading / Ref-list) அடையாளம் காணுதல்
-                    if full_line_text.upper().startswith("REFERENCES"):
+                    if full_line_text.upper().startswith("REFERENCES") or full_line_text.upper().startswith("NOTES"):
                         blocks_list.append({"type": "references_header", "spans": line_spans, "raw": full_line_text})
                     else:
                         blocks_list.append({"type": "heading", "spans": line_spans, "raw": full_line_text})
@@ -255,14 +255,13 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
     chapter_count = 0
     current_sec_num = 1
     current_subsec_char = "a"
-    in_references = False
-    ref_items = []
+    in_chapter_references = False
 
     chapter_regex = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
     sec_regex = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
     subsec_regex = re.compile(r'^([A-Z])\.\s+(.*)')
     subsubsec_regex = re.compile(r'^(\d+)\)\s*(.*)')
-    ref_item_regex = re.compile(r'^\[(\d+)\]\s+(.*)')
+    ref_item_regex = re.compile(r'^(\[?\d+\]?)\.?\s+(.*)')
 
     for precord in page_records:
         page_num = precord["page_num"]
@@ -272,22 +271,6 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
         for block in blocks_to_process:
             raw_txt = block["raw"]
             block_type = block.get("type", "para")
-
-            if block_type == "references_header" or raw_txt.upper().startswith("REFERENCES"):
-                in_references = True
-                continue
-
-            if in_references:
-                ref_match = ref_item_regex.match(raw_txt)
-                if ref_match:
-                    ref_items.append((ref_match.group(1), ref_match.group(2)))
-                elif ref_items:
-                    last_n, last_t = ref_items[-1]
-                    ref_items[-1] = (last_n, last_t + " " + raw_txt)
-                else:
-                    # ஒருவேளை பிராக்கெட் இல்லாத ரெஃபரன்ஸ் லைனாக இருந்தால் அப்படியே சேர்த்துக்கொள்ளும்
-                    ref_items.append((str(len(ref_items) + 1), raw_txt))
-                continue
 
             # Chapter Title Tagging
             chap_match = chapter_regex.match(raw_txt)
@@ -307,6 +290,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
                 etree.SubElement(current_chapter, "label").text = f"Chapter {c_num}"
                 etree.SubElement(current_chapter, "title").text = c_title
                 current_sec = None
+                in_chapter_references = False
                 continue
 
             if current_chapter is None:
@@ -315,6 +299,35 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
                 current_chapter.set("id", f"chap{chapter_count}")
                 etree.SubElement(current_chapter, "label").text = f"Chapter {chapter_count}"
                 etree.SubElement(current_chapter, "title").text = "Introduction"
+
+            # End of Chapter References / Notes detection & handling
+            if block_type == "references_header" or raw_txt.upper().startswith("REFERENCES") or raw_txt.upper().startswith("NOTES"):
+                in_chapter_references = True
+                ref_sec = etree.SubElement(current_chapter, "ref-list")
+                etree.SubElement(ref_sec, "title").text = raw_txt
+                continue
+
+            if in_chapter_references:
+                ref_match = ref_item_regex.match(raw_txt)
+                active_ref_list = current_chapter.find("ref-list")
+                if active_ref_list is None:
+                    active_ref_list = etree.SubElement(current_chapter, "ref-list")
+
+                if ref_match:
+                    r_num = ref_match.group(1).strip("[]")
+                    r_text = ref_match.group(2)
+                    ref_elem = etree.SubElement(active_ref_list, "ref", attrib={"id": f"ref-{chapter_count}-{r_num}"})
+                    etree.SubElement(ref_elem, "label").text = f"[{r_num}]"
+                    mix_cit = etree.SubElement(ref_elem, "mixed-citation", attrib={"publication-type": "other"})
+                    mix_cit.text = clean_to_hex_entities(r_text)
+                else:
+                    # ஒருவேளை தொடர்ச்சி வரிகளாக இருந்தால் கடைசி ref-ல் சேர்க்கும்
+                    refs = active_ref_list.findall("ref")
+                    if refs:
+                        last_mix = refs[-1].find("mixed-citation")
+                        if last_mix is not None:
+                            last_mix.text = (last_mix.text or "") + " " + clean_to_hex_entities(raw_txt)
+                continue
 
             # Footnote Tagging
             if block_type == "footnote":
@@ -379,23 +392,6 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
 
             p_node = etree.SubElement(active_parent, "p")
             append_styled_spans_to_node(p_node, block["spans"])
-
-    # 3. Back Matter (References Section Generation)
-    back = etree.SubElement(root, "back")
-    ref_list = etree.SubElement(back, "ref-list")
-    etree.SubElement(ref_list, "title").text = "References"
-
-    for r_num, r_text in ref_items:
-        clean_ref = clean_to_hex_entities(r_text).strip()
-        ref_elem = etree.SubElement(ref_list, "ref", attrib={"id": f"ref{r_num}"})
-        etree.SubElement(ref_elem, "label").text = f"[{r_num}]"
-        
-        mix_cit = etree.SubElement(
-            ref_elem, 
-            "mixed-citation", 
-            attrib={"publication-type": "other", "publication-format": "print"}
-        )
-        mix_cit.text = clean_ref
 
     doctype = '<!DOCTYPE book PUBLIC "-//NLM//DTD BITS Book Interchange DTD v2.0//EN" "BITS-book2.dtd">'
     raw_xml = etree.tostring(
