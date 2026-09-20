@@ -202,14 +202,13 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
     for page_idx, page in enumerate(doc, 1):
         if status_callback:
-            status_callback(f"Extracting layout on page {page_idx}/{total_pages}...")
+            status_callback(f"Extracting layout and paragraphs on page {page_idx}/{total_pages}...")
 
         page_height = page.rect.height
-        page_width = page.rect.width
         page_blocks = page.get_text("dict").get("blocks", [])
 
         page_full_text = page.get_text()
-        if chapter_regex.search(page_full_text) or "1." in page_full_text and page_idx > 2:
+        if chapter_regex.search(page_full_text) or ("1." in page_full_text and page_idx > 2):
             front_matter_ended = True
 
         if not front_matter_ended:
@@ -231,10 +230,11 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
             if not lines:
                 continue
 
-            current_spans = []
             block_x0 = block["bbox"][0]
             is_blockquote = (block_x0 - column_base_x0) > 14.0
 
+            current_paragraph_spans = []
+            
             for line_idx, line in enumerate(lines):
                 y0 = line["bbox"][1]
                 y1 = line["bbox"][3]
@@ -249,15 +249,16 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                 if is_actual_running_header(full_line_text, y0, page_height):
                     continue
 
+                # தலைப்புகள் (Headings / Sections / Chapters) வந்தால் முந்தைய பாராவை முடிக்க வேண்டும்
                 if (chapter_regex.match(full_line_text) or sec_regex.match(full_line_text) or 
                     subsec_regex.match(full_line_text) or subsubsec_regex.match(full_line_text) or 
                     ref_item_regex.match(full_line_text) or full_line_text.upper().startswith("REFERENCES") or 
                     full_line_text.upper().startswith("NOTES")):
                     
-                    if current_spans:
+                    if current_paragraph_spans:
                         block_kind = "disp-quote" if is_blockquote else "para"
-                        blocks_list.append({"type": block_kind, "spans": current_spans})
-                        current_spans = []
+                        blocks_list.append({"type": block_kind, "spans": current_paragraph_spans})
+                        current_paragraph_spans = []
                     
                     if full_line_text.upper().startswith("REFERENCES") or full_line_text.upper().startswith("NOTES"):
                         blocks_list.append({"type": "references_header", "spans": line_spans, "raw": full_line_text})
@@ -271,13 +272,16 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
                 fn_match = footnote_regex.match(full_line_text)
                 if (y1 > page_height - 65) and fn_match:
-                    if current_spans:
+                    if current_paragraph_spans:
                         block_kind = "disp-quote" if is_blockquote else "para"
-                        blocks_list.append({"type": block_kind, "spans": current_spans})
-                        current_spans = []
+                        blocks_list.append({"type": block_kind, "spans": current_paragraph_spans})
+                        current_paragraph_spans = []
                     blocks_list.append({"type": "footnote", "spans": line_spans, "raw": full_line_text, "label": fn_match.group(1) or "*"})
                     continue
 
+                # பத்தியின் வரிகளை இணைத்தல் (Paragraph Building Logic)
+                line_ends_with_period = full_line_text.endswith(('.', '?', '!', '”', '"'))
+                
                 for s_i, span in enumerate(line_spans):
                     span_copy = dict(span)
                     s_text = span_copy.get("text", "")
@@ -299,15 +303,22 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
                     else:
                         span_copy["pos_type"] = "regular"
 
-                    current_spans.append(span_copy)
+                    current_paragraph_spans.append(span_copy)
 
-                if current_spans:
-                    if not current_spans[-1]["text"].endswith(" "):
-                        current_spans.append({"text": " ", "flags": 0, "size": 10, "font": "", "pos_type": "regular"})
+                # வரிகளுக்கு இடையே இடைவெளி தருதல்
+                if current_paragraph_spans:
+                    if not current_paragraph_spans[-1]["text"].endswith(" "):
+                        current_paragraph_spans.append({"text": " ", "flags": 0, "size": 10, "font": "", "pos_type": "regular"})
 
-            if current_spans:
+                # பத்தி முடிகிறது என்றால் அதை தொகுப்பில் சேர்த்தல்
+                if line_ends_with_period and len(current_paragraph_spans) > 0:
+                    block_kind = "disp-quote" if is_blockquote else "para"
+                    blocks_list.append({"type": block_kind, "spans": current_paragraph_spans})
+                    current_paragraph_spans = []
+
+            if current_paragraph_spans:
                 block_kind = "disp-quote" if is_blockquote else "para"
-                blocks_list.append({"type": block_kind, "spans": current_spans})
+                blocks_list.append({"type": block_kind, "spans": current_paragraph_spans})
 
         page_records.append({"page_num": str(detected_page_folio), "blocks": blocks_list})
 
@@ -316,11 +327,11 @@ def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
 
 def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journal_title="Political Economy of China–Taiwan Relations", status_callback=None):
     if status_callback:
-        status_callback("Analyzing PDF layout and structure...")
+        status_callback("Analyzing PDF structure...")
     page_records = extract_pdf_pages_clean_header(pdf_path, status_callback)
 
     if status_callback:
-        status_callback("Assembling Bloomsbury Book DocBook 5.0 XML tree...")
+        status_callback("Building Bloomsbury Book DocBook 5.0 XML tree...")
 
     root = etree.Element(
         "book",
