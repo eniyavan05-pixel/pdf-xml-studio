@@ -49,18 +49,9 @@ ROMAN_TO_NUM = {
     "VI": 6, "VII": 7, "VIII": 8, "IX": 9, "X": 10
 }
 
-# Arabic to Roman converter for Front Matter pages (i, ii, iii, iv...)
 def int_to_roman(num):
-    val = [
-        1000, 900, 500, 400,
-        100, 90, 50, 40,
-        10, 9, 5, 4, 1
-    ]
-    syb = [
-        "m", "cm", "d", "cd",
-        "c", "xc", "l", "xl",
-        "x", "ix", "v", "iv", "i"
-    ]
+    val = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+    syb = ["m", "cm", "d", "cd", "c", "xc", "l", "xl", "x", "ix", "v", "iv", "i"]
     roman_num = ""
     i = 0
     while num > 0:
@@ -74,7 +65,7 @@ def clean_to_hex_entities(text):
     if not text:
         return ""
     
-    # சிங்கிள் கோட் மற்றும் அபாஸ்ட்ராபி இடைவெளி திருத்தம்
+    # சிங்கிள் கோட் / அபாஸ்ட்ராபி இடைவெளி திருத்தம்
     text = re.sub(r"(&apos;|['‘])\s+", r"\1", text)
     text = re.sub(r"\s+(&apos;|['’])", r"\1", text)
 
@@ -97,11 +88,6 @@ def clean_to_hex_entities(text):
     return valid_xml.sub('', text)
 
 def detect_and_wrap_math(text, parent_elem):
-    """
-    உண்மையான கணித குறியீடுகள்/சமன்பாடுகளை (Math expressions) மட்டும் கண்டறிந்து MathML (mml:math) ஆக மாற்றுதல்.
-    எளிய சாதாரண டெக்ஸ்ட்களை கணிதமாக மாற்றாமல் தவிர்த்தல்.
-    """
-    # எளிய உதாரணம்: சமன்பாடு அல்லது சிறப்பு கணித குறியீடுகள் உள்ளதா என சோதித்தல்
     math_pattern = re.compile(r'([A-Za-z]\s*[\+\-\*\/=<>]\s*[A-Za-z0-9]+|\b(?:sin|cos|tan|log|lim|sum|int)\b)')
     matches = list(math_pattern.finditer(text))
     
@@ -127,7 +113,6 @@ def detect_and_wrap_math(text, parent_elem):
                 parent_elem[-1].tail = (parent_elem[-1].tail or "") + normal_text
 
         math_str = text[start:end]
-        # MathML டேக் சேர்த்தல்
         mml_math = etree.SubElement(parent_elem, f"{{{MML_NS}}}math")
         mml_mi = etree.SubElement(mml_math, f"{{{MML_NS}}}mi")
         mml_mi.text = math_str
@@ -143,7 +128,6 @@ def append_styled_spans_to_node(target_p, span_list):
         if not raw_text:
             continue
 
-        # URI & Footnote Tagging Integration inside text nodes
         url_pattern = re.compile(r'(https?://[^\s]+|www\.[^\s]+|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)')
         parts = url_pattern.split(raw_text)
 
@@ -179,12 +163,10 @@ def extract_pdf_pages_clean_header(pdf_path):
         page_height = page.rect.height
         page_blocks = page.get_text("dict").get("blocks", [])
 
-        # Detect if we have reached the main chapter section from front matter
         page_full_text = page.get_text()
         if chapter_regex.search(page_full_text) or "1." in page_full_text and page_idx > 2:
             front_matter_ended = True
 
-        # Assign Page ID: Roman numerals for front matter, Arabic numbers for chapters
         if not front_matter_ended:
             detected_page_folio = int_to_roman(front_matter_counter)
             front_matter_counter += 1
@@ -213,16 +195,19 @@ def extract_pdf_pages_clean_header(pdf_path):
                 if not full_line_text:
                     continue
 
-                # Headings, Chapters, Sections, Footnotes identification
                 if (chapter_regex.match(full_line_text) or sec_regex.match(full_line_text) or 
                     subsec_regex.match(full_line_text) or subsubsec_regex.match(full_line_text) or 
-                    ref_item_regex.match(full_line_text) or full_line_text.startswith("REFERENCES") or 
-                    full_line_text.startswith("References")):
+                    ref_item_regex.match(full_line_text) or full_line_text.upper().startswith("REFERENCES")):
                     
                     if current_spans:
                         blocks_list.append({"type": "para", "spans": current_spans, "raw": "".join([s["text"] for s in current_spans]).strip()})
                         current_spans = []
-                    blocks_list.append({"type": "heading", "spans": line_spans, "raw": full_line_text})
+                    
+                    # References ஐத் தனிப் பிரிவாக (Heading / Ref-list) அடையாளம் காணுதல்
+                    if full_line_text.upper().startswith("REFERENCES"):
+                        blocks_list.append({"type": "references_header", "spans": line_spans, "raw": full_line_text})
+                    else:
+                        blocks_list.append({"type": "heading", "spans": line_spans, "raw": full_line_text})
                     continue
 
                 fn_match = footnote_regex.match(full_line_text)
@@ -288,7 +273,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
             raw_txt = block["raw"]
             block_type = block.get("type", "para")
 
-            if raw_txt.startswith("REFERENCES") or raw_txt.startswith("References"):
+            if block_type == "references_header" or raw_txt.upper().startswith("REFERENCES"):
                 in_references = True
                 continue
 
@@ -299,6 +284,9 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
                 elif ref_items:
                     last_n, last_t = ref_items[-1]
                     ref_items[-1] = (last_n, last_t + " " + raw_txt)
+                else:
+                    # ஒருவேளை பிராக்கெட் இல்லாத ரெஃபரன்ஸ் லைனாக இருந்தால் அப்படியே சேர்த்துக்கொள்ளும்
+                    ref_items.append((str(len(ref_items) + 1), raw_txt))
                 continue
 
             # Chapter Title Tagging
@@ -392,7 +380,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
             p_node = etree.SubElement(active_parent, "p")
             append_styled_spans_to_node(p_node, block["spans"])
 
-    # 3. Back Matter
+    # 3. Back Matter (References Section Generation)
     back = etree.SubElement(root, "back")
     ref_list = etree.SubElement(back, "ref-list")
     etree.SubElement(ref_list, "title").text = "References"
