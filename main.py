@@ -208,15 +208,15 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
             "version": "5.0",
             f"{{{XML_NS}}}lang": "en",
             "role": "fullText",
-            "xml:id": "b-9798216353157"
+            f"{{{XML_NS}}}id": "b-9798216353157"
         },
         nsmap=NS_MAP
     )
 
-    # Book Info / Metadata section matching sample XML 3
-    info = etree.SubElement(root, "info", attrib={"xml:id": "b-9798216353157-0000000"})
-    etree.SubElement(info, "title", attrib={"sortas": journal_title, "xml:id": "b-9798216353157-0000000"}).text = journal_title
-    etree.SubElement(info, "subtitle", attrib={"xml:id": "b-9798216353157-0000000"}).text = "Origins and Development"
+    # Book Info / Metadata section matching sample XML
+    info = etree.SubElement(root, "info", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"})
+    etree.SubElement(info, "title", attrib={"sortas": journal_title, f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = journal_title
+    etree.SubElement(info, "subtitle", attrib={f"{{{XML_NS}}}id": "b-9798216353157-0000000"}).text = "Origins and Development"
 
     current_chapter = None
     current_sec = None
@@ -243,9 +243,9 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 c_num = chap_match.group(1) or chap_match.group(3) or str(chapter_count)
                 c_title = chap_match.group(2).strip() if chap_match.group(2) else f"Chapter {c_num}"
 
-                current_chapter = etree.SubElement(root, "chapter", attrib={"xml:id": f"b-9798216447917-chapter{chapter_count}"})
-                ch_info = etree.SubElement(current_chapter, "info", attrib={"xml:id": f"b-9798216353157-0000000"})
-                ch_title = etree.SubElement(ch_info, "title", attrib={"xml:id": f"b-9798216353157-0000000"})
+                current_chapter = etree.SubElement(root, "chapter", attrib={f"{{{XML_NS}}}id": f"b-9798216447917-chapter{chapter_count}"})
+                ch_info = etree.SubElement(current_chapter, "info", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
+                ch_title = etree.SubElement(ch_info, "title", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
                 ch_title.text = f"<?page value=\"{page_num}\"?>{c_title}"
 
                 current_sec = None
@@ -254,9 +254,9 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
 
             if current_chapter is None:
                 chapter_count += 1
-                current_chapter = etree.SubElement(root, "chapter", attrib={"xml:id": f"b-9798216353157-intro"})
-                ch_info = etree.SubElement(current_chapter, "info", attrib={"xml:id": f"b-9798216353157-0000000"})
-                etree.SubElement(ch_info, "title", attrib={"xml:id": f"b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>Introduction"
+                current_chapter = etree.SubElement(root, "chapter", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-intro"})
+                ch_info = etree.SubElement(current_chapter, "info", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
+                etree.SubElement(ch_info, "title", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>Introduction"
 
             # End of Chapter References / Notes
             if block_type == "references_header" or raw_txt.upper().startswith("REFERENCES") or raw_txt.upper().startswith("NOTES"):
@@ -268,16 +268,16 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 if ref_match:
                     r_num = ref_match.group(1).strip("[]")
                     r_text = ref_match.group(2)
-                    fn_elem = etree.SubElement(current_chapter, "footnote", attrib={"role": "end-ch-note", "label": r_num, "xml:id": f"b-9798216353157-0000000"})
-                    p_fn = etree.SubElement(fn_elem, "para", attrib={"xml:id": f"b-9798216353157-0000000"})
+                    fn_elem = etree.SubElement(current_chapter, "footnote", attrib={"role": "end-ch-note", "label": r_num, f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
+                    p_fn = etree.SubElement(fn_elem, "para", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
                     p_fn.text = f"{r_num}.\u2002 {clean_to_hex_entities(r_text)}"
                 continue
 
             # Footnote Tagging
             if block_type == "footnote":
                 active_parent = current_sec if current_sec is not None else current_chapter
-                fn_elem = etree.SubElement(active_parent, "footnote", attrib={"role": "end-ch-note", "label": block.get('label', '1'), "xml:id": f"b-9798216353157-0000000"})
-                p_fn = etree.SubElement(fn_elem, "para", attrib={"xml:id": f"b-9798216353157-0000000"})
+                fn_elem = etree.SubElement(active_parent, "footnote", attrib={"role": "end-ch-note", "label": block.get('label', '1'), f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
+                p_fn = etree.SubElement(fn_elem, "para", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
                 p_fn.text = f"{block.get('label', '1')}.\u2002"
                 append_styled_spans_to_node(p_fn, block["spans"])
                 continue
@@ -289,18 +289,19 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 sec_num = ROMAN_TO_NUM.get(roman_val, current_sec_num)
                 current_sec_num = sec_num
                 
-                current_sec = etree.SubElement(current_chapter, "section", attrib={"xml:id": f"b-9798216353157-0000000"})
-                sec_info = etree.SubElement(current_sec, "info", attrib={"xml:id": f"b-9798216353157-0000000"})
-                etree.SubElement(sec_info, "title", attrib={"xml:id": f"b-9798216353157-0000000"}).text = sec_match.group(2).strip()
+                current_sec = etree.SubElement(current_chapter, "section", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
+                sec_info = etree.SubElement(current_sec, "info", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
+                etree.SubElement(sec_info, "title", attrib={f"{{{XML_NS}}}id": f"b-9798216353157-0000000"}).text = sec_match.group(2).strip()
                 continue
 
             parent_target = current_sec if current_sec is not None else current_chapter
 
             # Paragraph Tagging with Page values
-            p_node = etree.SubElement(parent_target, "para", attrib={"role": "fullOut", "xml:id": f"b-9798216353157-0000000"})
-            formatted_text = f"<?page value=\"{page_num}\"?>" if page_num else ""
+            p_node = etree.SubElement(parent_target, "para", attrib={"role": "fullOut", f"{{{XML_NS}}}id": f"b-9798216353157-0000000"})
             
-            # Spans styling and assembly
+            if page_num:
+                p_node.text = f"<?page value=\"{page_num}\"?>"
+
             append_styled_spans_to_node(p_node, block["spans"])
 
     doctype = '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V5.0//EN" "http://www.oasis-open.org/docbook/xml/5.0/docbook.dtd">'
