@@ -31,10 +31,10 @@ XML_NS = "http://www.w3.org/XML/1998/namespace"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 MML_NS = "http://www.w3.org/1998/Math/MathML"
 NS_MAP = {
-    "ali": "http://www.niso.org/schemas/ali/1.0/",
+    None: "http://docbook.org/ns/docbook",
     "xlink": XLINK_NS,
     "mml": MML_NS,
-    "xsi": "http://www.w3.org/2001/XMLSchema-instance"
+    "xml": XML_NS
 }
 
 LIGATURE_MAP = {
@@ -66,7 +66,7 @@ def clean_to_hex_entities(text):
     if not text:
         return ""
     
-    # சிங்கிள் கோட் / அபாஸ்ட்ராபி இடைவெளி திருத்தம்
+    # சிங்கிள் கோட் மற்றும் அபாஸ்ட்ராபி இடைவெளி திருத்தம்
     text = re.sub(r"(&apos;|['‘])\s+", r"\1", text)
     text = re.sub(r"\s+(&apos;|['’])", r"\1", text)
 
@@ -88,42 +88,6 @@ def clean_to_hex_entities(text):
     valid_xml = re.compile(r'[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]')
     return valid_xml.sub('', text)
 
-def detect_and_wrap_math(text, parent_elem):
-    # உண்மையான மேத் சமன்பாடுகளை மட்டும் கண்டறிந்து டேக்கிங் செய்தல்
-    math_pattern = re.compile(r'([A-Za-z]\s*[\+\-\*\/=<>]\s*[A-Za-z0-9]+|\b(?:sin|cos|tan|log|lim|sum|int)\b)')
-    matches = list(math_pattern.finditer(text))
-    
-    if not matches:
-        if len(parent_elem) > 0 and parent_elem[-1].tail:
-            parent_elem[-1].tail += text
-        elif len(parent_elem) == 0:
-            parent_elem.text = (parent_elem.text or "") + text
-        else:
-            parent_elem[-1].tail = (parent_elem[-1].tail or "") + text
-        return
-
-    last_idx = 0
-    for match in matches:
-        start, end = match.span()
-        if start > last_idx:
-            normal_text = text[last_idx:start]
-            if len(parent_elem) > 0 and parent_elem[-1].tail:
-                parent_elem[-1].tail += normal_text
-            elif len(parent_elem) == 0:
-                parent_elem.text = (parent_elem.text or "") + normal_text
-            else:
-                parent_elem[-1].tail = (parent_elem[-1].tail or "") + normal_text
-
-        math_str = text[start:end]
-        mml_math = etree.SubElement(parent_elem, f"{{{MML_NS}}}math")
-        mml_mi = etree.SubElement(mml_math, f"{{{MML_NS}}}mi")
-        mml_mi.text = math_str
-        last_idx = end
-
-    if last_idx < len(text):
-        remainder = text[last_idx:]
-        mml_math.tail = (mml_math.tail or "") + remainder
-
 def append_styled_spans_to_node(target_p, span_list):
     for span in span_list:
         raw_text = clean_to_hex_entities(span.get("text", ""))
@@ -139,12 +103,18 @@ def append_styled_spans_to_node(target_p, span_list):
                     continue
                 if url_pattern.match(part):
                     full_url = part if part.startswith("http") else f"http://{part}"
-                    uri_elem = etree.SubElement(target_p, "uri", attrib={f"{{{XLINK_NS}}}href": full_url})
-                    uri_elem.text = part
+                    uri_elem = etree.SubElement(target_p, "link", attrib={f"{{{XLINK_NS}}}href": full_url})
+                    uri_sub = etree.SubElement(uri_elem, "uri")
+                    uri_sub.text = part
                 else:
-                    detect_and_wrap_math(part, target_p)
+                    target_p.text = (target_p.text or "") + part
         else:
-            detect_and_wrap_math(raw_text, target_p)
+            if len(target_p) > 0 and target_p[-1].tail:
+                target_p[-1].tail += raw_text
+            elif len(target_p) == 0:
+                target_p.text = (target_p.text or "") + raw_text
+            else:
+                target_p[-1].tail = (target_p[-1].tail or "") + raw_text
 
 def extract_pdf_pages_clean_header(pdf_path):
     doc = pymupdf.open(pdf_path)
@@ -153,8 +123,7 @@ def extract_pdf_pages_clean_header(pdf_path):
     chapter_regex = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
     sec_regex = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
     subsec_regex = re.compile(r'^([A-Z])\.\s+(.*)')
-    subsubsec_regex = re.compile(r'^(\d+)\)\s*(.*)')
-    ref_item_regex = re.compile(r'^\[(\d+)\]\s+(.*)')
+    ref_item_regex = re.compile(r'^(\[?\d+\]?)\.?\s+(.*)')
     footnote_regex = re.compile(r'^(?:(\d+)\.|\*)\s+(.*)')
 
     front_matter_ended = False
@@ -198,9 +167,8 @@ def extract_pdf_pages_clean_header(pdf_path):
                     continue
 
                 if (chapter_regex.match(full_line_text) or sec_regex.match(full_line_text) or 
-                    subsec_regex.match(full_line_text) or subsubsec_regex.match(full_line_text) or 
-                    ref_item_regex.match(full_line_text) or full_line_text.upper().startswith("REFERENCES") or
-                    full_line_text.upper().startswith("NOTES")):
+                    subsec_regex.match(full_line_text) or ref_item_regex.match(full_line_text) or 
+                    full_line_text.upper().startswith("REFERENCES") or full_line_text.upper().startswith("NOTES")):
                     
                     if current_spans:
                         blocks_list.append({"type": "para", "spans": current_spans, "raw": "".join([s["text"] for s in current_spans]).strip()})
@@ -237,21 +205,19 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
     root = etree.Element(
         "book",
         attrib={
-            "xmlns": "http://docbook.org/ns/docbook",
             "version": "5.0",
             f"{{{XML_NS}}}lang": "en",
             "role": "fullText",
             "xml:id": "b-9798216353157"
         },
-        nsmap={None: "http://docbook.org/ns/docbook", "xlink": XLINK_NS, "mml": MML_NS, "xml": XML_NS}
+        nsmap=NS_MAP
     )
 
-    # 1. Info / Metadata Section (Model match to 9798216353157_txt_xml_2.xml)
+    # Book Info / Metadata section matching sample XML 3
     info = etree.SubElement(root, "info", attrib={"xml:id": "b-9798216353157-0000000"})
     etree.SubElement(info, "title", attrib={"sortas": journal_title, "xml:id": "b-9798216353157-0000000"}).text = journal_title
     etree.SubElement(info, "subtitle", attrib={"xml:id": "b-9798216353157-0000000"}).text = "Origins and Development"
 
-    # 2. Body & Chapters Processing
     current_chapter = None
     current_sec = None
     chapter_count = 0
@@ -260,13 +226,11 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
 
     chapter_regex = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
     sec_regex = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
-    subsec_regex = re.compile(r'^([A-Z])\.\s+(.*)')
     ref_item_regex = re.compile(r'^(\[?\d+\]?)\.?\s+(.*)')
 
     for precord in page_records:
         page_num = precord["page_num"]
         blocks_to_process = precord["blocks"]
-        page_marker_inserted = False
 
         for block in blocks_to_process:
             raw_txt = block["raw"]
@@ -279,12 +243,9 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 c_num = chap_match.group(1) or chap_match.group(3) or str(chapter_count)
                 c_title = chap_match.group(2).strip() if chap_match.group(2) else f"Chapter {c_num}"
 
-                current_chapter = etree.SubElement(root, "chapter")
-                current_chapter.set("xml:id", f"b-9798216447917-chapter{chapter_count}")
-
-                # Chapter Info
-                ch_info = etree.SubElement(current_chapter, "info", attrib={"xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
-                ch_title = etree.SubElement(ch_info, "title", attrib={"xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
+                current_chapter = etree.SubElement(root, "chapter", attrib={"xml:id": f"b-9798216447917-chapter{chapter_count}"})
+                ch_info = etree.SubElement(current_chapter, "info", attrib={"xml:id": f"b-9798216353157-0000000"})
+                ch_title = etree.SubElement(ch_info, "title", attrib={"xml:id": f"b-9798216353157-0000000"})
                 ch_title.text = f"<?page value=\"{page_num}\"?>{c_title}"
 
                 current_sec = None
@@ -293,10 +254,9 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
 
             if current_chapter is None:
                 chapter_count += 1
-                current_chapter = etree.SubElement(root, "chapter")
-                current_chapter.set("xml:id", f"b-9798216447917-intro")
-                ch_info = etree.SubElement(current_chapter, "info")
-                etree.SubElement(ch_info, "title").text = f"<?page value=\"{page_num}\"?>Introduction"
+                current_chapter = etree.SubElement(root, "chapter", attrib={"xml:id": f"b-9798216353157-intro"})
+                ch_info = etree.SubElement(current_chapter, "info", attrib={"xml:id": f"b-9798216353157-0000000"})
+                etree.SubElement(ch_info, "title", attrib={"xml:id": f"b-9798216353157-0000000"}).text = f"<?page value=\"{page_num}\"?>Introduction"
 
             # End of Chapter References / Notes
             if block_type == "references_header" or raw_txt.upper().startswith("REFERENCES") or raw_txt.upper().startswith("NOTES"):
@@ -308,16 +268,16 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 if ref_match:
                     r_num = ref_match.group(1).strip("[]")
                     r_text = ref_match.group(2)
-                    fn_elem = etree.SubElement(current_chapter, "footnote", attrib={"role": "end-ch-note", "label": r_num})
-                    p_fn = etree.SubElement(fn_elem, "para")
+                    fn_elem = etree.SubElement(current_chapter, "footnote", attrib={"role": "end-ch-note", "label": r_num, "xml:id": f"b-9798216353157-0000000"})
+                    p_fn = etree.SubElement(fn_elem, "para", attrib={"xml:id": f"b-9798216353157-0000000"})
                     p_fn.text = f"{r_num}.\u2002 {clean_to_hex_entities(r_text)}"
                 continue
 
             # Footnote Tagging
             if block_type == "footnote":
                 active_parent = current_sec if current_sec is not None else current_chapter
-                fn_elem = etree.SubElement(active_parent, "footnote", attrib={"role": "end-ch-note", "label": block.get('label', '1')})
-                p_fn = etree.SubElement(fn_elem, "para")
+                fn_elem = etree.SubElement(active_parent, "footnote", attrib={"role": "end-ch-note", "label": block.get('label', '1'), "xml:id": f"b-9798216353157-0000000"})
+                p_fn = etree.SubElement(fn_elem, "para", attrib={"xml:id": f"b-9798216353157-0000000"})
                 p_fn.text = f"{block.get('label', '1')}.\u2002"
                 append_styled_spans_to_node(p_fn, block["spans"])
                 continue
@@ -329,15 +289,18 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journ
                 sec_num = ROMAN_TO_NUM.get(roman_val, current_sec_num)
                 current_sec_num = sec_num
                 
-                current_sec = etree.SubElement(current_chapter, "section", attrib={"xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
-                sec_info = etree.SubElement(current_sec, "info")
-                etree.SubElement(sec_info, "title").text = sec_match.group(2).strip()
+                current_sec = etree.SubElement(current_chapter, "section", attrib={"xml:id": f"b-9798216353157-0000000"})
+                sec_info = etree.SubElement(current_sec, "info", attrib={"xml:id": f"b-9798216353157-0000000"})
+                etree.SubElement(sec_info, "title", attrib={"xml:id": f"b-9798216353157-0000000"}).text = sec_match.group(2).strip()
                 continue
 
             parent_target = current_sec if current_sec is not None else current_chapter
 
-            # Paragraph Tagging
-            p_node = etree.SubElement(parent_target, "para", attrib={"role": "fullOut", "xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
+            # Paragraph Tagging with Page values
+            p_node = etree.SubElement(parent_target, "para", attrib={"role": "fullOut", "xml:id": f"b-9798216353157-0000000"})
+            formatted_text = f"<?page value=\"{page_num}\"?>" if page_num else ""
+            
+            # Spans styling and assembly
             append_styled_spans_to_node(p_node, block["spans"])
 
     doctype = '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V5.0//EN" "http://www.oasis-open.org/docbook/xml/5.0/docbook.dtd">'
@@ -396,8 +359,6 @@ async def run_conversion(file_id: str):
         parse_full_pdf(target["file_path"], out_xml_path)
         target["status"] = "Done"
         target["xml_path"] = out_xml_path
-        
-        # டவுன்லோட் தடையின்றி நடக்க உரிய Headers சேர்த்து அனுப்புதல்
         return JSONResponse({
             "status": "success", 
             "download_url": f"/api/download/{target['id']}",
