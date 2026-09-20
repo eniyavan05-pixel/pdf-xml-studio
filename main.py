@@ -10,6 +10,7 @@ from lxml import etree
 from fastapi import FastAPI, File, UploadFile, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+import urllib.parse
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = sys._MEIPASS
@@ -65,7 +66,7 @@ def clean_to_hex_entities(text):
     if not text:
         return ""
     
-    # சிங்கிள் கோட் மற்றும் அபாஸ்ட்ராபி இடைவெளி திருத்தம் (PDF 100% துல்லியம்)
+    # சிங்கிள் கோட் / அபாஸ்ட்ராபி இடைவெளி திருத்தம்
     text = re.sub(r"(&apos;|['‘])\s+", r"\1", text)
     text = re.sub(r"\s+(&apos;|['’])", r"\1", text)
 
@@ -88,6 +89,7 @@ def clean_to_hex_entities(text):
     return valid_xml.sub('', text)
 
 def detect_and_wrap_math(text, parent_elem):
+    # உண்மையான மேத் சமன்பாடுகளை மட்டும் கண்டறிந்து டேக்கிங் செய்தல்
     math_pattern = re.compile(r'([A-Za-z]\s*[\+\-\*\/=<>]\s*[A-Za-z0-9]+|\b(?:sin|cos|tan|log|lim|sum|int)\b)')
     matches = list(math_pattern.finditer(text))
     
@@ -229,38 +231,36 @@ def extract_pdf_pages_clean_header(pdf_path):
     doc.close()
     return page_records
 
-def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", journal_title="IEEE Wireless Communications Letters"):
+def parse_full_pdf(pdf_path, output_xml_path, doi="10.5040/9798216353157", journal_title="Political Economy of China–Taiwan Relations"):
     page_records = extract_pdf_pages_clean_header(pdf_path)
 
     root = etree.Element(
         "book",
         attrib={
-            "dtd-version": "2.0",
-            f"{{{XML_NS}}}lang": "eng"
+            "xmlns": "http://docbook.org/ns/docbook",
+            "version": "5.0",
+            f"{{{XML_NS}}}lang": "en",
+            "role": "fullText",
+            "xml:id": "b-9798216353157"
         },
-        nsmap=NS_MAP
+        nsmap={None: "http://docbook.org/ns/docbook", "xlink": XLINK_NS, "mml": MML_NS, "xml": XML_NS}
     )
 
-    front = etree.SubElement(root, "front")
-    b_meta = etree.SubElement(front, "book-meta")
-    etree.SubElement(etree.SubElement(b_meta, "book-title-group"), "book-title").text = journal_title
-    etree.SubElement(b_meta, "object-id", attrib={"pub-id-type": "doi"}).text = doi
+    # 1. Info / Metadata Section (Model match to 9798216353157_txt_xml_2.xml)
+    info = etree.SubElement(root, "info", attrib={"xml:id": "b-9798216353157-0000000"})
+    etree.SubElement(info, "title", attrib={"sortas": journal_title, "xml:id": "b-9798216353157-0000000"}).text = journal_title
+    etree.SubElement(info, "subtitle", attrib={"xml:id": "b-9798216353157-0000000"}).text = "Origins and Development"
 
-    body = etree.SubElement(root, "body")
+    # 2. Body & Chapters Processing
     current_chapter = None
     current_sec = None
-    current_subsec = None
-    current_subsubsec = None
-    
     chapter_count = 0
     current_sec_num = 1
-    current_subsec_char = "a"
     in_chapter_references = False
 
     chapter_regex = re.compile(r'^(?:Chapter\s+(\d+|[IVXLCDM]+)[:.]?\s*(.*)|(?:CHAPTER\s+(\d+|[IVXLCDM]+)))', re.IGNORECASE)
     sec_regex = re.compile(r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)\.\s+(.*)')
     subsec_regex = re.compile(r'^([A-Z])\.\s+(.*)')
-    subsubsec_regex = re.compile(r'^(\d+)\)\s*(.*)')
     ref_item_regex = re.compile(r'^(\[?\d+\]?)\.?\s+(.*)')
 
     for precord in page_records:
@@ -279,62 +279,46 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
                 c_num = chap_match.group(1) or chap_match.group(3) or str(chapter_count)
                 c_title = chap_match.group(2).strip() if chap_match.group(2) else f"Chapter {c_num}"
 
-                current_chapter = etree.SubElement(body, "chapter")
-                current_chapter.set("id", f"chap{chapter_count}")
+                current_chapter = etree.SubElement(root, "chapter")
+                current_chapter.set("xml:id", f"b-9798216447917-chapter{chapter_count}")
 
-                page_marker = etree.SubElement(current_chapter, "named-content")
-                page_marker.set("content-type", "page-id")
-                page_marker.set("id", f"page-{page_num}")
-                page_marker_inserted = True
+                # Chapter Info
+                ch_info = etree.SubElement(current_chapter, "info", attrib={"xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
+                ch_title = etree.SubElement(ch_info, "title", attrib={"xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
+                ch_title.text = f"<?page value=\"{page_num}\"?>{c_title}"
 
-                etree.SubElement(current_chapter, "label").text = f"Chapter {c_num}"
-                etree.SubElement(current_chapter, "title").text = c_title
                 current_sec = None
                 in_chapter_references = False
                 continue
 
             if current_chapter is None:
                 chapter_count += 1
-                current_chapter = etree.SubElement(body, "chapter")
-                current_chapter.set("id", f"chap{chapter_count}")
-                etree.SubElement(current_chapter, "label").text = f"Chapter {chapter_count}"
-                etree.SubElement(current_chapter, "title").text = "Introduction"
+                current_chapter = etree.SubElement(root, "chapter")
+                current_chapter.set("xml:id", f"b-9798216447917-intro")
+                ch_info = etree.SubElement(current_chapter, "info")
+                etree.SubElement(ch_info, "title").text = f"<?page value=\"{page_num}\"?>Introduction"
 
-            # End of Chapter References / Notes detection & handling
+            # End of Chapter References / Notes
             if block_type == "references_header" or raw_txt.upper().startswith("REFERENCES") or raw_txt.upper().startswith("NOTES"):
                 in_chapter_references = True
-                ref_sec = etree.SubElement(current_chapter, "ref-list")
-                etree.SubElement(ref_sec, "title").text = raw_txt
                 continue
 
             if in_chapter_references:
                 ref_match = ref_item_regex.match(raw_txt)
-                active_ref_list = current_chapter.find("ref-list")
-                if active_ref_list is None:
-                    active_ref_list = etree.SubElement(current_chapter, "ref-list")
-
                 if ref_match:
                     r_num = ref_match.group(1).strip("[]")
                     r_text = ref_match.group(2)
-                    ref_elem = etree.SubElement(active_ref_list, "ref", attrib={"id": f"ref-{chapter_count}-{r_num}"})
-                    etree.SubElement(ref_elem, "label").text = f"[{r_num}]"
-                    mix_cit = etree.SubElement(ref_elem, "mixed-citation", attrib={"publication-type": "other"})
-                    mix_cit.text = clean_to_hex_entities(r_text)
-                else:
-                    # ஒருவேளை தொடர்ச்சி வரிகளாக இருந்தால் கடைசி ref-ல் சேர்க்கும்
-                    refs = active_ref_list.findall("ref")
-                    if refs:
-                        last_mix = refs[-1].find("mixed-citation")
-                        if last_mix is not None:
-                            last_mix.text = (last_mix.text or "") + " " + clean_to_hex_entities(raw_txt)
+                    fn_elem = etree.SubElement(current_chapter, "footnote", attrib={"role": "end-ch-note", "label": r_num})
+                    p_fn = etree.SubElement(fn_elem, "para")
+                    p_fn.text = f"{r_num}.\u2002 {clean_to_hex_entities(r_text)}"
                 continue
 
             # Footnote Tagging
             if block_type == "footnote":
-                active_parent = current_subsubsec or current_subsec or current_sec or current_chapter
-                fn_elem = etree.SubElement(active_parent, "fn", attrib={"id": f"fn-{page_num}-{block.get('label', '1')}"})
-                etree.SubElement(fn_elem, "label").text = block.get('label', '1')
-                p_fn = etree.SubElement(fn_elem, "p")
+                active_parent = current_sec if current_sec is not None else current_chapter
+                fn_elem = etree.SubElement(active_parent, "footnote", attrib={"role": "end-ch-note", "label": block.get('label', '1')})
+                p_fn = etree.SubElement(fn_elem, "para")
+                p_fn.text = f"{block.get('label', '1')}.\u2002"
                 append_styled_spans_to_node(p_fn, block["spans"])
                 continue
 
@@ -345,55 +329,18 @@ def parse_full_pdf(pdf_path, output_xml_path, doi="10.1109/LWC.2025.3627417", jo
                 sec_num = ROMAN_TO_NUM.get(roman_val, current_sec_num)
                 current_sec_num = sec_num
                 
-                current_sec = etree.SubElement(current_chapter, "sec")
-                current_sec.set("id", f"sec{sec_num}")
-
-                if not page_marker_inserted:
-                    page_marker = etree.SubElement(current_sec, "named-content")
-                    page_marker.set("content-type", "page-id")
-                    page_marker.set("id", f"page-{page_num}")
-                    page_marker_inserted = True
-
-                etree.SubElement(current_sec, "label").text = sec_match.group(1) + "."
-                etree.SubElement(current_sec, "title").text = sec_match.group(2).strip()
-                current_subsec = None
-                current_subsubsec = None
+                current_sec = etree.SubElement(current_chapter, "section", attrib={"xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
+                sec_info = etree.SubElement(current_sec, "info")
+                etree.SubElement(sec_info, "title").text = sec_match.group(2).strip()
                 continue
 
             parent_target = current_sec if current_sec is not None else current_chapter
 
-            # Subsection Tagging
-            subsec_match = subsec_regex.match(raw_txt)
-            if subsec_match and len(raw_txt) < 60:
-                char_val = subsec_match.group(1).lower()
-                current_subsec_char = char_val
-                
-                current_subsec = etree.SubElement(parent_target, "sec")
-                current_subsec.set("id", f"sec{current_sec_num}{char_val}")
-
-                if not page_marker_inserted:
-                    page_marker = etree.SubElement(current_subsec, "named-content")
-                    page_marker.set("content-type", "page-id")
-                    page_marker.set("id", f"page-{page_num}")
-                    page_marker_inserted = True
-
-                etree.SubElement(current_subsec, "label").text = subsec_match.group(1) + "."
-                etree.SubElement(current_subsec, "title").text = subsec_match.group(2).strip()
-                current_subsubsec = None
-                continue
-
-            active_parent = current_subsubsec or current_subsec or current_sec or current_chapter
-
-            if not page_marker_inserted:
-                page_marker = etree.SubElement(active_parent, "named-content")
-                page_marker.set("content-type", "page-id")
-                page_marker.set("id", f"page-{page_num}")
-                page_marker_inserted = True
-
-            p_node = etree.SubElement(active_parent, "p")
+            # Paragraph Tagging
+            p_node = etree.SubElement(parent_target, "para", attrib={"role": "fullOut", "xml:id": f"b-9798216447917-{uuid.uuid4().hex[:8]}"})
             append_styled_spans_to_node(p_node, block["spans"])
 
-    doctype = '<!DOCTYPE book PUBLIC "-//NLM//DTD BITS Book Interchange DTD v2.0//EN" "BITS-book2.dtd">'
+    doctype = '<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V5.0//EN" "http://www.oasis-open.org/docbook/xml/5.0/docbook.dtd">'
     raw_xml = etree.tostring(
         root,
         pretty_print=True,
@@ -449,14 +396,29 @@ async def run_conversion(file_id: str):
         parse_full_pdf(target["file_path"], out_xml_path)
         target["status"] = "Done"
         target["xml_path"] = out_xml_path
-        return JSONResponse({"status": "success", "download_url": f"/api/download/{target['id']}"})
+        
+        # டவுன்லோட் தடையின்றி நடக்க உரிய Headers சேர்த்து அனுப்புதல்
+        return JSONResponse({
+            "status": "success", 
+            "download_url": f"/api/download/{target['id']}",
+            "filename": os.path.basename(out_xml_path)
+        })
     except Exception as err:
         return JSONResponse({"status": "error", "message": str(err)}, status_code=500)
 
 @app.get("/api/download/{item_id}")
 async def download_xml_file(item_id: str):
     target = next((item for item in conversion_history if item.get("id") == item_id), None)
-    return FileResponse(target["xml_path"], filename=os.path.basename(target["xml_path"]), media_type="application/xml")
+    if not target or "xml_path" not in target:
+        return JSONResponse({"status": "error", "message": "File not found."}, status_code=404)
+        
+    file_path = target["xml_path"]
+    filename = os.path.basename(file_path)
+    
+    headers = {
+        'Content-Disposition': f'attachment; filename="{urllib.parse.quote(filename)}"'
+    }
+    return FileResponse(file_path, headers=headers, media_type="application/xml")
 
 if __name__ == "__main__":
     import uvicorn
