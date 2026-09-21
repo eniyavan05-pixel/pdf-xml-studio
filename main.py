@@ -477,7 +477,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi, book_title, status_callback=N
     if doi:
         doi_elem = etree.SubElement(info_elem, f"{{{DOCBOOK_NS}}}biblioid", attrib={"class": "doi"})
         doi_elem.text = doi
-        obj_id_elem = etree.SubElement(info_elem, "object-id", attrib={"pub-id-type": "doi"})
+        obj_id_elem = etree.SubElement(info_elem, f"{{{DOCBOOK_NS}}}object-id", attrib={"pub-id-type": "doi"})
         obj_id_elem.text = doi
 
     # 2. Front Matter Part Setup
