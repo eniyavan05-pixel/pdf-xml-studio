@@ -1,24 +1,15 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import re
-import tempfile
+import threading
+import multiprocessing
 import pymupdf
 from lxml import etree
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
-app = FastAPI(title="DocBook 5.0 Online Conversion API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# DocBook 5.0 Namespaces and Maps
+# DocBook 5.0 Namespaces
 DOCBOOK_NS = "http://docbook.org/ns/docbook"
 XLINK_NS = "http://www.w3.org/1999/xlink"
 MML_NS = "http://www.w3.org/1998/Math/MathML"
@@ -50,6 +41,13 @@ VALID_COMPOUND_WORDS = {
 NUMBER_PREFIXES = {
     "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "well", "all"
 }
+
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 def clean_to_hex_entities(text):
     if not text:
@@ -102,7 +100,6 @@ def fix_missing_boundary_spaces(text):
     if not text:
         return ""
     text = re.sub(r'([,;])([A-Za-z])', r'\1 \2', text)
-    text = re.sub(r'(&#x[0-9A-Fa-f]{4,6};)\s+([a-z]{1,4}\b)', r'\1\2', text)
     text = re.sub(r'&#x201C;\s+', '&#x201C;', text)
     text = re.sub(r'\s+&#x201D;', '&#x201D;', text)
     text = re.sub(r'&#x2019;\s*s\b', '&#x2019;s', text)
@@ -281,8 +278,9 @@ def extract_exact_page_number(page, last_confirmed_page):
 
     return detected_folio
 
-def extract_pdf_pages_clean_header(pdf_path):
+def extract_pdf_pages_clean_header(pdf_path, status_callback=None):
     doc = pymupdf.open(pdf_path)
+    total_pages = len(doc)
     page_records = []
     
     chapter_regex = re.compile(r'^(CHAPTER\s+\d+|ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|ELEVEN|TWELVE|\d+)\b', re.IGNORECASE)
@@ -292,6 +290,9 @@ def extract_pdf_pages_clean_header(pdf_path):
     last_folio = None
 
     for idx, page in enumerate(doc, 1):
+        if status_callback:
+            status_callback(f"Extracting layout on page {idx}/{total_pages}...")
+
         detected_page_folio = extract_exact_page_number(page, last_folio)
         last_folio = detected_page_folio
 
@@ -377,7 +378,7 @@ def extract_pdf_pages_clean_header(pdf_path):
                     if s_i < len(line_spans) - 1:
                         next_span_x0 = line_spans[s_i + 1]["bbox"][0]
                         curr_span_x1 = span["bbox"][2]
-                        if (next_span_x0 - curr_span_x1) > 3.5 and not span_copy["text"].endswith(" "):
+                        if (next_span_x0 - curr_span_x1) > 2.0 and not span_copy["text"].endswith(" "):
                             span_copy["text"] += " "
 
                     current_spans.append(span_copy)
@@ -440,8 +441,13 @@ def extract_pdf_pages_clean_header(pdf_path):
 
     return page_records
 
-def parse_full_pdf(pdf_path, output_xml_path, doi, book_title):
-    page_records = extract_pdf_pages_clean_header(pdf_path)
+def parse_full_pdf(pdf_path, output_xml_path, doi, book_title, status_callback=None):
+    if status_callback:
+        status_callback("Analyzing PDF layout...")
+    page_records = extract_pdf_pages_clean_header(pdf_path, status_callback)
+
+    if status_callback:
+        status_callback("Building DocBook XML document...")
 
     book_id = "b-" + re.sub(r'[^a-zA-Z0-9]', '', os.path.splitext(os.path.basename(output_xml_path))[0])
     id_counter = 1
@@ -463,6 +469,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi, book_title):
         nsmap=NS_MAP
     )
 
+    # 1. Info Block
     info_elem = etree.SubElement(root, f"{{{DOCBOOK_NS}}}info", attrib={f"{{{XML_NS}}}id": next_id()})
     t_elem = etree.SubElement(info_elem, f"{{{DOCBOOK_NS}}}title", attrib={f"{{{XML_NS}}}id": next_id()})
     t_elem.text = clean_to_hex_entities(book_title)
@@ -470,9 +477,10 @@ def parse_full_pdf(pdf_path, output_xml_path, doi, book_title):
     if doi:
         doi_elem = etree.SubElement(info_elem, f"{{{DOCBOOK_NS}}}biblioid", attrib={"class": "doi"})
         doi_elem.text = doi
-        obj_id_elem = etree.SubElement(info_elem, "object-id", pub_id_type="doi")
+        obj_id_elem = etree.SubElement(info_elem, "object-id", attrib={"pub-id-type": "doi"})
         obj_id_elem.text = doi
 
+    # 2. Front Matter Part Setup
     front_part = etree.SubElement(root, f"{{{DOCBOOK_NS}}}part", attrib={"role": "front", f"{{{XML_NS}}}id": next_id()})
     front_info = etree.SubElement(front_part, f"{{{DOCBOOK_NS}}}info", attrib={f"{{{XML_NS}}}id": next_id()})
     front_title = etree.SubElement(front_info, f"{{{DOCBOOK_NS}}}title", attrib={f"{{{XML_NS}}}id": next_id()})
@@ -481,6 +489,7 @@ def parse_full_pdf(pdf_path, output_xml_path, doi, book_title):
     preface_elem = etree.SubElement(front_part, f"{{{DOCBOOK_NS}}}preface", attrib={"role": "prelims", f"{{{XML_NS}}}id": next_id()})
     toc_elem = etree.SubElement(front_part, f"{{{DOCBOOK_NS}}}toc", attrib={f"{{{XML_NS}}}id": next_id()})
 
+    # 3. Content Assembly Loop
     current_chapter = None
     current_section = None
     chap_count = 0
@@ -610,6 +619,9 @@ def parse_full_pdf(pdf_path, output_xml_path, doi, book_title):
                 append_styled_spans_to_node(p, block["spans"])
                 prev_block_type = "para"
 
+    if status_callback:
+        status_callback("Normalizing hexadecimal entities and XML formatting...")
+
     pi_rng = etree.ProcessingInstruction("oxygen", 'RNGSchema="bloomsbury-mods.rnc"')
     pi_sch = etree.ProcessingInstruction("oxygen", 'SCHSchema="docbook-mods.sch" type="compact"')
 
@@ -628,31 +640,122 @@ def parse_full_pdf(pdf_path, output_xml_path, doi, book_title):
     with open(output_xml_path, "w", encoding="utf-8") as f:
         f.write(clean_xml)
 
-@app.post("/convert/")
-async def convert_pdf_endpoint(
-    file: UploadFile = File(...),
-    doi: str = Form("10.5040/9798216438984"),
-    book_title: str = Form("Overcoming Student Apathy")
-):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-    
-    with tempfile.TemporaryDirectory() as temp_dir:
-        input_pdf_path = os.path.join(temp_dir, file.filename)
-        output_xml_filename = os.path.splitext(file.filename)[0] + ".xml"
-        output_xml_path = os.path.join(temp_dir, output_xml_filename)
+    if status_callback:
+        status_callback("Ready")
 
-        contents = await file.read()
-        with open(input_pdf_path, "wb") as f:
-            f.write(contents)
+class UniversalConverterApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("DocBook 5.0 Converter Suite")
+        self.geometry("640x410")
+        self.resizable(False, False)
 
-        try:
-            parse_full_pdf(input_pdf_path, output_xml_path, doi, book_title)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Conversion error: {str(e)}")
+        ico_file = resource_path("flyingbees.ico")
+        if os.path.exists(ico_file):
+            try:
+                self.iconbitmap(ico_file)
+            except Exception:
+                pass
 
-        return FileResponse(
-            output_xml_path,
-            media_type="application/xml",
-            filename=output_xml_filename
+        tk.Label(
+            self,
+            text="DocBook 5.0 XML Conversion Engine",
+            font=("Arial", 13, "bold"),
+            fg="#0F172A"
+        ).pack(pady=(12, 2))
+        
+        tk.Label(
+            self,
+            text="Precision Pagination, Hexadecimal Entities & Bloomsbury Schema Support",
+            font=("Arial", 9, "italic"),
+            fg="#64748B"
+        ).pack(pady=(0, 10))
+
+        f = tk.Frame(self)
+        f.pack(fill="x", padx=25, pady=5)
+
+        tk.Label(f, text="Input PDF:").grid(row=0, column=0, sticky="w")
+        self.pdf_in = tk.Entry(f, width=45)
+        self.pdf_in.grid(row=0, column=1, padx=5, pady=5)
+        tk.Button(f, text="Browse...", command=self.browse).grid(row=0, column=2)
+
+        tk.Label(f, text="DOI:").grid(row=1, column=0, sticky="w")
+        self.doi_in = tk.Entry(f, width=45)
+        self.doi_in.insert(0, "10.5040/9798216438984")
+        self.doi_in.grid(row=1, column=1, padx=5, pady=5)
+
+        tk.Label(f, text="Book Title:").grid(row=2, column=0, sticky="w")
+        self.title_in = tk.Entry(f, width=45)
+        self.title_in.insert(0, "Overcoming Student Apathy")
+        self.title_in.grid(row=2, column=1, padx=5, pady=5)
+
+        self.prog_bar = ttk.Progressbar(self, mode="indeterminate", length=540)
+        self.status_label = tk.Label(self, text="Ready", font=("Arial", 9), fg="#475569")
+        
+        self.btn = tk.Button(
+            self,
+            text="Generate DocBook XML",
+            bg="#0284C7",
+            fg="white",
+            font=("Arial", 11, "bold"),
+            command=self.start_conversion_thread
         )
+        self.btn.pack(pady=(12, 8))
+        self.prog_bar.pack(pady=4)
+        self.status_label.pack(pady=(2, 10))
+
+    def browse(self):
+        fn = filedialog.askopenfilename(filetypes=[("PDF Documents", "*.pdf")])
+        if fn:
+            self.pdf_in.delete(0, tk.END)
+            self.pdf_in.insert(0, fn)
+
+    def set_status(self, text):
+        self.after(0, lambda: self.status_label.config(text=text))
+
+    def start_conversion_thread(self):
+        pdf_path = self.pdf_in.get().strip()
+        if not os.path.exists(pdf_path):
+            return messagebox.showerror("Error", "Valid PDF file is required.")
+        
+        out_fn = filedialog.asksaveasfilename(
+            defaultextension=".xml",
+            filetypes=[("XML files", "*.xml")],
+            initialfile=f"{os.path.splitext(os.path.basename(pdf_path))[0]}.xml"
+        )
+        if not out_fn:
+            return
+
+        self.btn.config(state="disabled", text="Converting XML...")
+        self.prog_bar.start(10)
+
+        worker = threading.Thread(
+            target=self.run_conversion_worker,
+            args=(pdf_path, out_fn, self.doi_in.get().strip(), self.title_in.get().strip()),
+            daemon=True
+        )
+        worker.start()
+
+    def run_conversion_worker(self, pdf_path, out_fn, doi, title):
+        try:
+            parse_full_pdf(pdf_path, out_fn, doi, title, status_callback=self.set_status)
+            self.after(0, lambda: self.on_conversion_success(out_fn))
+        except Exception as e:
+            self.after(0, lambda: self.on_conversion_error(str(e)))
+
+    def on_conversion_success(self, out_fn):
+        self.prog_bar.stop()
+        self.status_label.config(text="Ready")
+        self.btn.config(state="normal", text="Generate DocBook XML")
+        messagebox.showinfo("Success", f"DocBook XML generated successfully!\n\nSaved to:\n{out_fn}")
+
+    def on_conversion_error(self, err_msg):
+        self.prog_bar.stop()
+        self.status_label.config(text="Error occurred during conversion")
+        self.btn.config(state="normal", text="Generate DocBook XML")
+        messagebox.showerror("Conversion Error", f"An error occurred while generating XML:\n\n{err_msg}")
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    app = UniversalConverterApp()
+    app.mainloop()
